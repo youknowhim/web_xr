@@ -3,7 +3,6 @@
 A production-ready WebXR spatial measurement tool built with React, Three.js, and React Three Fiber. 
 
 Unlike native iOS/Android AR apps, this application runs entirely in the mobile browser. It utilizes the WebXR Device API to interface directly with smartphone LiDAR and depth sensors for precise spatial mapping and physical-world measurements.
-
 [![Screen-Recording-07-18-2026-15-17-18-1(1).gif](https://i.postimg.cc/cLdtK9V8/Screen-Recording-07-18-2026-15-17-18-1(1).gif)](https://postimg.cc/mt6gJwZb)
 
 ## 🛠 Tech Stack
