@@ -1,75 +1,50 @@
-# React + TypeScript + Vite
-
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
-
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+# WebXR Spatial Ruler 📏
+ 
+A production-ready WebXR spatial measurement tool built with React, Three.js, and React Three Fiber.
+ 
+Unlike native iOS/Android AR apps, this application runs entirely in the mobile browser. It utilizes the WebXR Device API to interface directly with smartphone LiDAR and depth sensors for precise spatial mapping and physical-world measurements.
+ 
+<img width="400" height="867" alt="preview-ezgif com-optimize" src="https://github.com/user-attachments/assets/16258c74-fdeb-4ad8-b9c6-5ebb4943f4de" />
+## 🛠 Tech Stack
+ 
+- **Framework:** React 18 + Vite + TypeScript
+- **3D Engine:** Three.js
+- **Spatial/AR Integration:** `@react-three/xr` (WebXR)
+- **3D React Abstraction:** `@react-three/fiber` & `@react-three/drei`
+- **Styling:** Tailwind CSS + Radix UI (Glassmorphic HUD)
+## ✨ Core Features
+ 
+- **Real-time Spatial Hit-Testing:** Maps physical surfaces and dynamically aligns 3D targeting reticles to floor and furniture geometry.
+- **Live Measurement Preview:** Dynamically calculates and renders Euclidean distance via a glowing 3D tube geometry before the user locks in the final anchor.
+- **Dual-Unit High-Performance UI:** Bypasses asynchronous React rendering lag by syncing spatial coordinates to refs, driving a high-contrast 3D text overlay (cm & inches) that automatically rotates to face the user's camera.
+- **Glancing Angle Compensation:** Utilizes 3D spatial markers to allow users to walk around objects for accurate depth plotting, rather than relying on standard 2D screen-space tapping.
+## 🧠 Technical Challenges Overcome
+ 
+**1. The WebXR Stale Closure Problem**
+ 
+React's asynchronous state updates natively conflict with high-frequency WebXR frame loops (running at 60-120hz). To prevent the frame loop from reading stale state during measurement calculations, I implemented a synchronized `useRef` pattern. This allows the physical 3D text and tube geometries to update instantaneously without triggering full React DOM re-renders.
+ 
+**2. Matrix Auto-Update Conflicts**
+ 
+To prevent WebXR from overwriting the targeting reticle's local animations, the structural `hitMatrix` is applied to an outer `<group>` with `matrixAutoUpdate={false}`, while the spinning animation and 90-degree flat floor rotation is applied to an isolated inner `<mesh>`.
+ 
+## 🚀 How to Run Locally
+ 
+> **Note:** WebXR requires a secure `https` context and an AR-compatible mobile browser.
+ 
+1. **Install dependencies:**
+```bash
+   npm install
 ```
-
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+ 
+2. **Start the local development server:**
+```bash
+   npm run dev
 ```
+ 
+3. **Expose the local port via an HTTPS tunnel:**
+```bash
+   npx ngrok http 5173
+```
+ 
+4. **Open the generated tunnel URL** on a WebXR-compatible mobile browser (Chrome for Android, or Mozilla WebXR Viewer for iOS).
