@@ -6,6 +6,12 @@ type ArConfig = {
   init: XRSessionInit;
 };
 
+/** Depth sensing has to be configured up front or the request is rejected. */
+const DEPTH_INIT: XRDepthStateInit = {
+  usagePreference: ['cpu-optimized'],
+  dataFormatPreference: ['luminance-alpha'],
+};
+
 /**
  * Session configurations from richest to barest.
  *
@@ -22,20 +28,27 @@ const AR_CONFIGS: ArConfig[] = [
     label: 'hit-test required + DOM overlay',
     init: {
       requiredFeatures: ['hit-test'],
-      optionalFeatures: ['dom-overlay', 'local-floor', 'anchors'],
+      optionalFeatures: [
+        'dom-overlay',
+        'local-floor',
+        'anchors',
+        'plane-detection',
+        'depth-sensing',
+      ],
       domOverlay: { root: document.body },
+      depthSensing: DEPTH_INIT,
     },
   },
   {
     label: 'hit-test + DOM overlay, both optional',
     init: {
-      optionalFeatures: ['hit-test', 'dom-overlay', 'local-floor', 'anchors'],
+      optionalFeatures: ['hit-test', 'dom-overlay', 'local-floor', 'anchors', 'plane-detection'],
       domOverlay: { root: document.body },
     },
   },
   {
     label: 'hit-test optional, no overlay',
-    init: { optionalFeatures: ['hit-test', 'anchors'] },
+    init: { optionalFeatures: ['hit-test', 'anchors', 'plane-detection'] },
   },
   {
     label: 'bare immersive-ar',

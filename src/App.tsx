@@ -163,6 +163,7 @@ function App() {
       {presenting ? (
         <MeasureOverlay
           placed={corners.length}
+          scanning={stats.hits === 0}
           metrics={metrics}
           stats={stats}
           log={log}

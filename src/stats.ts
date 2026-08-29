@@ -7,6 +7,8 @@ export type RuntimeStats = {
   fps: number;
   /** Frames in the last sample that found a surface. */
   hits: number;
+  /** Planes ARCore is currently tracking. Zero means it has mapped nothing. */
+  planes: number;
   /** Corners pinned to a real-world anchor. */
   anchors: number;
 };
@@ -16,5 +18,6 @@ export const IDLE_STATS: RuntimeStats = {
   refSpace: false,
   fps: 0,
   hits: 0,
+  planes: 0,
   anchors: 0,
 };

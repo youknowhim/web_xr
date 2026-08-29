@@ -1,11 +1,20 @@
 import type * as React from 'react';
-import { Cross2Icon, FrameIcon, InfoCircledIcon, ResetIcon, TargetIcon } from '@radix-ui/react-icons';
+import {
+  Cross2Icon,
+  FrameIcon,
+  InfoCircledIcon,
+  ResetIcon,
+  TargetIcon,
+  UpdateIcon,
+} from '@radix-ui/react-icons';
 import type { RuntimeStats } from './stats';
 import { CORNER_COUNT, RECTANGLE_TOLERANCE, toMeters } from './measure';
 import type { RectangleMetrics } from './measure';
 
 type MeasureOverlayProps = {
   placed: number;
+  /** True until the device has actually locked on to a surface. */
+  scanning: boolean;
   metrics: RectangleMetrics | null;
   stats: RuntimeStats;
   log: string[];
@@ -21,6 +30,7 @@ const tick = (ok: boolean) => (ok ? 'ok' : 'x');
 
 export default function MeasureOverlay({
   placed,
+  scanning,
   metrics,
   stats,
   log,
@@ -56,16 +66,24 @@ export default function MeasureOverlay({
         </button>
       </div>
 
-      {/* Corner prompt */}
+      {/* Corner prompt, or the scanning hint while the room is still unmapped */}
       {placed < CORNER_COUNT && (
         <div
           className="pointer-events-none absolute inset-x-0 z-20 flex justify-center px-4"
           style={{ top: 'calc(var(--safe-top) + 3.9rem)' }}
         >
-          <div className="flex items-center gap-1.5 rounded-full bg-white/95 px-4 py-2 text-[13px] font-semibold text-zinc-900 shadow-md">
-            <TargetIcon className="h-3.5 w-3.5 text-blue-600" />
-            Tap corner {placed + 1} of {CORNER_COUNT}
-          </div>
+          {scanning ? (
+            <div className="flex max-w-[19rem] items-center gap-2 rounded-2xl bg-amber-500/95 px-4 py-2.5 text-[12px] font-medium leading-snug text-white shadow-md">
+              <UpdateIcon className="h-4 w-4 shrink-0 animate-spin" />
+              Move the phone slowly side to side, and aim at a textured, well-lit
+              surface.
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 rounded-full bg-white/95 px-4 py-2 text-[13px] font-semibold text-zinc-900 shadow-md">
+              <TargetIcon className="h-3.5 w-3.5 text-blue-600" />
+              Tap corner {placed + 1} of {CORNER_COUNT}
+            </div>
+          )}
         </div>
       )}
 
@@ -137,7 +155,7 @@ export default function MeasureOverlay({
           <div className="mt-2 flex justify-center">
             <div className="rounded-full bg-zinc-900/80 px-3 py-1 font-mono text-[10px] text-zinc-300">
               hs:{tick(stats.hitSource)} rs:{tick(stats.refSpace)} fps:{stats.fps} hits:{stats.hits}{' '}
-              anc:{stats.anchors}
+              pl:{stats.planes} anc:{stats.anchors}
             </div>
           </div>
 

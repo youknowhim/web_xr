@@ -319,6 +319,7 @@ export default function ARRuler({
         refSpace: Boolean(referenceSpace),
         fps: Math.round((statsFramesRef.current * 1000) / elapsed),
         hits: statsHitsRef.current,
+        planes: frame.detectedPlanes?.size ?? 0,
         anchors: anchorCount,
       });
       statsFramesRef.current = 0;
