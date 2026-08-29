@@ -22,6 +22,56 @@ export function midpoint(a: THREE.Vector3, b: THREE.Vector3): THREE.Vector3 {
   return new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
 }
 
+/**
+ * Sort four corners into a ring that does not cross itself.
+ *
+ * Tapped out of order - say 1, 2, 4, 3 - the outline becomes a bow-tie whose
+ * "sides" are really the diagonals. That measures the wrong distances *and*
+ * still scores 100%, because the true diagonals become equal sides. Sorting
+ * the corners by angle around their centroid, in their own plane, yields a
+ * simple quadrilateral whatever order they were tapped in.
+ */
+export function orderCorners(corners: THREE.Vector3[]): THREE.Vector3[] {
+  if (corners.length !== CORNER_COUNT) return corners;
+
+  const centroid = new THREE.Vector3();
+  for (const corner of corners) centroid.add(corner);
+  centroid.divideScalar(corners.length);
+
+  // Take the best-conditioned triple: any single triple can be degenerate if
+  // three of the taps happen to land in a line.
+  const normal = new THREE.Vector3();
+  const triples = [
+    [0, 1, 2],
+    [0, 1, 3],
+    [0, 2, 3],
+    [1, 2, 3],
+  ];
+  for (const [i, j, k] of triples) {
+    const candidate = new THREE.Vector3()
+      .subVectors(corners[j], corners[i])
+      .cross(new THREE.Vector3().subVectors(corners[k], corners[i]));
+    if (candidate.lengthSq() > normal.lengthSq()) normal.copy(candidate);
+  }
+  if (normal.lengthSq() < 1e-12) return corners;
+  normal.normalize();
+
+  // In-plane basis, with the first corner defining the zero angle.
+  const xAxis = new THREE.Vector3()
+    .subVectors(corners[0], centroid)
+    .projectOnPlane(normal);
+  if (xAxis.lengthSq() < 1e-12) return corners;
+  xAxis.normalize();
+  const yAxis = new THREE.Vector3().crossVectors(normal, xAxis);
+
+  const angleOf = (corner: THREE.Vector3) => {
+    const offset = new THREE.Vector3().subVectors(corner, centroid);
+    return Math.atan2(offset.dot(yAxis), offset.dot(xAxis));
+  };
+
+  return [...corners].sort((a, b) => angleOf(a) - angleOf(b));
+}
+
 export type RectangleMetrics = {
   /** Longer of the two averaged side pairs, in metres. */
   length: number;

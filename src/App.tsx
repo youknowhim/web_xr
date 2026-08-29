@@ -12,7 +12,13 @@ import {
 } from '@radix-ui/react-icons';
 import ARRuler from './ARRuler';
 import EnterArButton from './EnterArButton';
-import { CORNER_COUNT, RECTANGLE_TOLERANCE, rectangleMetrics, toUnits } from './measure';
+import {
+  CORNER_COUNT,
+  RECTANGLE_TOLERANCE,
+  orderCorners,
+  rectangleMetrics,
+  toUnits,
+} from './measure';
 
 /** Everything we can learn about WebXR support without awaiting anything. */
 function initialDiagnostics(): string[] {
@@ -32,7 +38,10 @@ function App() {
   const [showLog, setShowLog] = useState(false);
   const [presenting, setPresenting] = useState(false);
 
-  const metrics = useMemo(() => rectangleMetrics(corners), [corners]);
+  // Corners are measured in ring order, not tap order, so tapping them out of
+  // sequence still describes the same shape.
+  const ring = useMemo(() => orderCorners(corners), [corners]);
+  const metrics = useMemo(() => rectangleMetrics(ring), [ring]);
   const isComplete = corners.length === CORNER_COUNT;
 
   const logLine = useCallback((message: string) => {
@@ -118,7 +127,7 @@ function App() {
           }}
         >
           <ARRuler
-            corners={corners}
+            corners={ring}
             metrics={metrics}
             onAddCorner={addCorner}
             onLiveEdge={setLiveEdge}
