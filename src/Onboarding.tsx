@@ -30,12 +30,18 @@ function Tip({
   );
 }
 
-/** The four corner dots of the how-it-works diagram. */
+/**
+ * Corner dots of the how-it-works diagram, as percentages of the box.
+ *
+ * Anchoring with `right-0`/`bottom-0` and then translating by -50% pulls the
+ * dot inwards instead of centring it, so every dot is placed from the same
+ * left/top origin and shifted by half its own size.
+ */
 const DIAGRAM_DOTS = [
-  'left-0 top-0',
-  'right-0 top-0',
-  'left-0 bottom-0',
-  'right-0 bottom-0',
+  { left: '0%', top: '0%' },
+  { left: '100%', top: '0%' },
+  { left: '0%', top: '100%' },
+  { left: '100%', top: '100%' },
 ];
 
 export default function Onboarding({
@@ -92,9 +98,13 @@ export default function Onboarding({
             <div className="relative mx-auto h-24 w-full max-w-[13rem] rounded-lg bg-white/70 ring-1 ring-blue-200">
               {DIAGRAM_DOTS.map((corner) => (
                 <span
-                  key={corner}
-                  className={`absolute h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-blue-600 shadow ${corner}`}
-                  style={{ transform: 'translate(-50%, -50%)' }}
+                  key={`${corner.left}-${corner.top}`}
+                  className="absolute h-3.5 w-3.5 rounded-full border-2 border-white bg-blue-600 shadow"
+                  style={{
+                    left: corner.left,
+                    top: corner.top,
+                    transform: 'translate(-50%, -50%)',
+                  }}
                 />
               ))}
             </div>

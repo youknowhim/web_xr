@@ -11,7 +11,16 @@ const UP = new THREE.Vector3(0, 1, 0);
 const DOT_COLOR = '#2563eb';
 const LINE_COLOR = '#3b82f6';
 const WARN_COLOR = '#f59e0b';
-const DONE_COLOR = '#2563eb';
+
+/**
+ * How long the last surface reading stays usable.
+ *
+ * Hit-testing does not return a result on every single frame - a plain wall or
+ * a moving phone drops results for a few frames at a time. Judging a tap by
+ * whether *this* frame had a hit rejects taps constantly, so a recent reading
+ * counts, and the reticle stops flickering with it.
+ */
+const HIT_GRACE_MS = 700;
 
 /** Hit-test setup can lose the race with session startup, so it gets retries. */
 const HIT_SOURCE_TRIES = 6;
@@ -33,6 +42,12 @@ const scratchDirection = new THREE.Vector3();
 const scratchQuaternion = new THREE.Quaternion();
 
 let nextCornerId = 1;
+
+type PendingAnchor = {
+  id: number;
+  position: THREE.Vector3;
+  quaternion: THREE.Quaternion;
+};
 
 type ARRulerProps = {
   corners: Corner[];
@@ -118,7 +133,9 @@ export default function ARRuler({
   const session = useXR((state) => state.session);
 
   const hitSourceRef = useRef<XRHitTestSource | null>(null);
-  const hitResultRef = useRef<XRHitTestResult | null>(null);
+  const lastHitAtRef = useRef(0);
+  const lastHitMatrixRef = useRef(new THREE.Matrix4());
+  const pendingAnchorsRef = useRef<PendingAnchor[]>([]);
   const sawHitRef = useRef(false);
   const frameCountRef = useRef(0);
 
@@ -131,10 +148,7 @@ export default function ARRuler({
   const drawPoints = useMemo(() => corners.map(liftedPosition), [corners]);
   const edges = useMemo(() => outlineEdges(drawPoints), [drawPoints]);
 
-  const anchorCount = useMemo(
-    () => corners.filter((corner) => corner.anchor).length,
-    [corners],
-  );
+  const anchorCount = useMemo(() => corners.filter((corner) => corner.anchor).length, [corners]);
 
   /**
    * Acquire the hit-test source, with retries.
@@ -147,7 +161,8 @@ export default function ARRuler({
     if (!session) return;
 
     sawHitRef.current = false;
-    hitResultRef.current = null;
+    lastHitAtRef.current = 0;
+    pendingAnchorsRef.current = [];
     if (liveEdgeRef.current) liveEdgeRef.current.visible = false;
     if (reticleRef.current) reticleRef.current.visible = false;
 
@@ -222,38 +237,76 @@ export default function ARRuler({
     [corners, onCornersUpdate],
   );
 
+  /**
+   * Anchor the taps queued since the last frame.
+   *
+   * Anchors have to be created from a live XRFrame, and a tap arrives between
+   * frames - so the exact tapped pose is queued and anchored here.
+   */
+  const drainPendingAnchors = useCallback(
+    (frame: XRFrame, referenceSpace: XRReferenceSpace) => {
+      const pending = pendingAnchorsRef.current;
+      if (pending.length === 0) return;
+      pendingAnchorsRef.current = [];
+
+      const createAnchor = frame.createAnchor?.bind(frame);
+      if (!createAnchor) {
+        onDebug('anchors unavailable - points may drift');
+        return;
+      }
+
+      for (const item of pending) {
+        const transform = new XRRigidTransform(
+          { x: item.position.x, y: item.position.y, z: item.position.z },
+          {
+            x: item.quaternion.x,
+            y: item.quaternion.y,
+            z: item.quaternion.z,
+            w: item.quaternion.w,
+          },
+        );
+        createAnchor(transform, referenceSpace)
+          .then((anchor) => onAttachAnchor(item.id, anchor))
+          .catch((error: Error) => onDebug(`anchor failed: ${error.name}: ${error.message}`));
+      }
+    },
+    [onAttachAnchor, onDebug],
+  );
+
   useFrame((state, _, frame) => {
     if (!frame) return;
 
+    const now = performance.now();
     const referenceSpace = state.gl.xr.getReferenceSpace();
     const source = hitSourceRef.current;
 
     const [hit] = source && referenceSpace ? frame.getHitTestResults(source) : [];
     const pose = referenceSpace ? hit?.getPose(referenceSpace) : undefined;
-    const reticle = reticleRef.current;
 
-    if (!pose) {
-      // No surface under the crosshair: stop showing a stale reticle.
-      hitResultRef.current = null;
-      if (reticle) reticle.visible = false;
-    } else {
+    if (pose) {
       if (!sawHitRef.current) {
         sawHitRef.current = true;
         onDebug('surface found - reticle is live');
       }
-      hitResultRef.current = hit;
-      scratchMatrix.fromArray(pose.transform.matrix);
-      if (reticle) {
-        reticle.visible = true;
-        reticle.matrix.copy(scratchMatrix);
-      }
+      lastHitAtRef.current = now;
+      lastHitMatrixRef.current.fromArray(pose.transform.matrix);
+    }
+
+    // A reading from the last fraction of a second still counts, so neither the
+    // reticle nor a tap is thrown away by one empty frame.
+    const surfaceFresh = now - lastHitAtRef.current < HIT_GRACE_MS;
+    const reticle = reticleRef.current;
+    if (reticle) {
+      reticle.visible = surfaceFresh;
+      if (surfaceFresh) reticle.matrix.copy(lastHitMatrixRef.current);
     }
 
     // Live edge from the last placed corner out to the reticle.
     const liveEdge = liveEdgeRef.current;
-    if (!pose || corners.length === 0 || corners.length >= CORNER_COUNT) {
+    if (!surfaceFresh || corners.length === 0 || corners.length >= CORNER_COUNT) {
       if (liveEdge) liveEdge.visible = false;
     } else if (liveEdge) {
+      scratchMatrix.copy(lastHitMatrixRef.current);
       scratchCursor.setFromMatrixPosition(scratchMatrix);
       scratchNormal
         .set(0, 1, 0)
@@ -276,6 +329,8 @@ export default function ARRuler({
     }
 
     if (referenceSpace) {
+      drainPendingAnchors(frame, referenceSpace);
+
       frameCountRef.current += 1;
       if (frameCountRef.current % ANCHOR_SYNC_FRAMES === 0) {
         syncAnchors(frame, referenceSpace);
@@ -285,7 +340,6 @@ export default function ARRuler({
     // Status strip, refreshed twice a second.
     statsFramesRef.current += 1;
     if (pose) statsHitsRef.current += 1;
-    const now = performance.now();
     if (statsSinceRef.current === 0) statsSinceRef.current = now;
     const elapsed = now - statsSinceRef.current;
     if (elapsed >= STATS_INTERVAL_MS) {
@@ -303,30 +357,26 @@ export default function ARRuler({
   });
 
   const handleSelect = useCallback(() => {
-    const reticle = reticleRef.current;
-    if (!reticle || !reticle.visible) {
-      onDebug('tap ignored - aim at a surface first');
+    const age = performance.now() - lastHitAtRef.current;
+    if (lastHitAtRef.current === 0 || age > HIT_GRACE_MS) {
+      onDebug(`tap ignored - no surface (last seen ${Math.round(age)}ms ago)`);
       return;
     }
+
+    const matrix = lastHitMatrixRef.current;
+    const position = new THREE.Vector3().setFromMatrixPosition(matrix);
+    const quaternion = new THREE.Quaternion().setFromRotationMatrix(matrix);
 
     const id = nextCornerId++;
-    onAddCorner({
-      id,
-      position: new THREE.Vector3().setFromMatrixPosition(reticle.matrix),
-      quaternion: new THREE.Quaternion().setFromRotationMatrix(reticle.matrix),
-    });
+    onAddCorner({ id, position, quaternion });
 
-    // Pin it to the real world so it does not slide as tracking is refined.
-    const hit = hitResultRef.current;
-    const createAnchor = hit?.createAnchor?.bind(hit);
-    if (!createAnchor) {
-      onDebug('anchors unavailable - points may drift');
-      return;
-    }
-    createAnchor()
-      .then((anchor) => onAttachAnchor(id, anchor))
-      .catch((error: Error) => onDebug(`anchor failed: ${error.name}: ${error.message}`));
-  }, [onAddCorner, onAttachAnchor, onDebug]);
+    // Anchoring needs a live frame, so hand the exact pose to the next one.
+    pendingAnchorsRef.current.push({
+      id,
+      position: position.clone(),
+      quaternion: quaternion.clone(),
+    });
+  }, [onAddCorner, onDebug]);
 
   // Listen on the session itself. A phone tap arrives as a transient input
   // source, and a controller-level listener can be attached a beat too late to
@@ -338,11 +388,7 @@ export default function ARRuler({
     return () => session.removeEventListener('select', listener);
   }, [session, handleSelect]);
 
-  const outlineColor = metrics
-    ? metrics.isRectangular
-      ? DONE_COLOR
-      : WARN_COLOR
-    : LINE_COLOR;
+  const outlineColor = metrics ? (metrics.isRectangular ? DOT_COLOR : WARN_COLOR) : LINE_COLOR;
 
   return (
     <>
