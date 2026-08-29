@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
-import { ARButton, XR } from '@react-three/xr';
+import { XR } from '@react-three/xr';
 import {
   ArrowLeftIcon,
   CheckCircledIcon,
@@ -11,6 +11,7 @@ import {
   TrashIcon,
 } from '@radix-ui/react-icons';
 import ARRuler from './ARRuler';
+import EnterArButton from './EnterArButton';
 import { CORNER_COUNT, RECTANGLE_TOLERANCE, rectangleMetrics, toUnits } from './measure';
 
 /** Everything we can learn about WebXR support without awaiting anything. */
@@ -42,21 +43,10 @@ function App() {
     setCorners((prev) => (prev.length >= CORNER_COUNT ? [corner] : [...prev, corner]));
   }, []);
 
+  const showTrouble = useCallback(() => setShowLog(true), []);
+
   const undo = useCallback(() => setCorners((prev) => prev.slice(0, -1)), []);
   const reset = useCallback(() => setCorners([]), []);
-
-  // Hit-test is what makes measuring possible, so ask for it as a required
-  // feature: if the device cannot provide it we get a loud rejection instead
-  // of a session that silently never produces a reticle. 'local-floor' stays
-  // optional because handheld AR only guarantees 'local'.
-  const sessionInit = useMemo<XRSessionInit>(
-    () => ({
-      requiredFeatures: ['hit-test'],
-      optionalFeatures: ['dom-overlay', 'dom-overlay-for-handheld-ar', 'local-floor', 'anchors'],
-      domOverlay: { root: document.body },
-    }),
-    [],
-  );
 
   useEffect(() => {
     if (!navigator.xr) return;
@@ -287,15 +277,11 @@ function App() {
             <ArrowLeftIcon className="h-5 w-5" />
           </button>
 
-          <ARButton
-            style={{}}
-            sessionInit={sessionInit}
-            onClick={() => logLine('tapped Enter AR')}
-            onError={(error) => {
-              logLine(`ARButton: ${error.name}: ${error.message}`);
-              setShowLog(true);
-            }}
-            className="h-14 flex-1 rounded-2xl border border-sky-400/50 bg-sky-600/90 px-4 text-sm font-bold uppercase tracking-wider text-white shadow-[0_0_30px_rgba(14,165,233,0.3)] backdrop-blur-xl transition active:scale-95"
+          <EnterArButton
+            presenting={presenting}
+            onLog={logLine}
+            onTrouble={showTrouble}
+            className="h-14 flex-1 rounded-2xl border border-sky-400/50 bg-sky-600/90 px-4 text-sm font-bold uppercase tracking-wider text-white shadow-[0_0_30px_rgba(14,165,233,0.3)] backdrop-blur-xl transition active:scale-95 disabled:border-white/10 disabled:bg-neutral-800/80 disabled:text-neutral-500 disabled:shadow-none"
           />
 
           <button
