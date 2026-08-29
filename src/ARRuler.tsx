@@ -1,131 +1,184 @@
-import { useState, useRef, useMemo, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useHitTest, useXR } from '@react-three/xr';
 import { useFrame } from '@react-three/fiber';
 import { Text } from '@react-three/drei';
+import { CORNER_COUNT, midpoint, outlineEdges, toUnits } from './measure';
+import type { RectangleMetrics } from './measure';
 
 const UP = new THREE.Vector3(0, 1, 0);
+const LABEL_LIFT = 0.06;
 
 type ARRulerProps = {
-  onUpdate: (cm: string, inches: string, step: number) => void;
+  corners: THREE.Vector3[];
+  metrics: RectangleMetrics | null;
+  onAddCorner: (corner: THREE.Vector3) => void;
+  onLiveEdge: (meters: number | null) => void;
   onDebug?: (message: string) => void;
 };
 
-export default function ARRuler({ onUpdate, onDebug }: ARRulerProps) {
-  const [points, setPoints] = useState<THREE.Vector3[]>([]);
+/** A cylinder stretched so it spans exactly from `a` to `b`. */
+function Segment({
+  a,
+  b,
+  color,
+  radius = 0.004,
+  opacity = 1,
+}: {
+  a: THREE.Vector3;
+  b: THREE.Vector3;
+  color: string;
+  radius?: number;
+  opacity?: number;
+}) {
+  const transform = useMemo(() => {
+    const direction = new THREE.Vector3().subVectors(b, a);
+    const length = direction.length();
+    return {
+      length,
+      position: midpoint(a, b),
+      quaternion: new THREE.Quaternion().setFromUnitVectors(UP, direction.normalize()),
+    };
+  }, [a, b]);
 
+  if (transform.length < 1e-4) return null;
+
+  return (
+    <mesh
+      position={transform.position}
+      quaternion={transform.quaternion}
+      scale={[1, transform.length, 1]}
+    >
+      <cylinderGeometry args={[radius, radius, 1, 8]} />
+      <meshBasicMaterial color={color} transparent opacity={opacity} />
+    </mesh>
+  );
+}
+
+/** World-space text that always turns to face the camera. */
+function Label({
+  position,
+  children,
+  color = '#ffffff',
+  fontSize = 0.045,
+}: {
+  position: THREE.Vector3;
+  children: string;
+  color?: string;
+  fontSize?: number;
+}) {
+  const ref = useRef<THREE.Mesh>(null);
+
+  useFrame(({ camera }) => {
+    ref.current?.quaternion.copy(camera.quaternion);
+  });
+
+  return (
+    <Text
+      ref={ref}
+      position={position}
+      fontSize={fontSize}
+      color={color}
+      outlineWidth={fontSize * 0.09}
+      outlineColor="#000000"
+      anchorX="center"
+      anchorY="middle"
+      textAlign="center"
+      lineHeight={1.2}
+    >
+      {children}
+    </Text>
+  );
+}
+
+export default function ARRuler({
+  corners,
+  metrics,
+  onAddCorner,
+  onLiveEdge,
+  onDebug,
+}: ARRulerProps) {
   const reticleRef = useRef<THREE.Group>(null);
-  const innerCursorRef = useRef<THREE.Mesh>(null);
-  const liveLineRef = useRef<THREE.Mesh>(null);
-  const textRef = useRef<any>(null);
-
-  const pointsRef = useRef<THREE.Vector3[]>([]);
-  pointsRef.current = points;
+  const spinnerRef = useRef<THREE.Mesh>(null);
+  const liveEdgeRef = useRef<THREE.Mesh>(null);
 
   const session = useXR((state) => state.session);
-  const sawHitRef = useRef<boolean>(false);
 
-  // Helper to calculate exact units
-  const calculateUnits = (distanceInMeters: number) => {
-    const cm = (distanceInMeters * 100).toFixed(1);
-    const inches = (distanceInMeters * 39.3701).toFixed(1);
-    return { cm, inches };
-  };
-
-  // Stretch a unit-height cylinder so it spans from `a` to `b`.
-  const spanLine = (mesh: THREE.Mesh, a: THREE.Vector3, b: THREE.Vector3) => {
-    const distance = a.distanceTo(b);
-    if (distance < 1e-4) {
-      mesh.visible = false;
-      return;
-    }
-    mesh.visible = true;
-    mesh.position.addVectors(a, b).multiplyScalar(0.5);
-    mesh.quaternion.setFromUnitVectors(UP, new THREE.Vector3().subVectors(b, a).normalize());
-    mesh.scale.set(1, distance, 1);
-  };
+  // Only push a live length upward when the displayed value would actually
+  // change, so the HUD is not re-rendering 60 times a second.
+  const lastLiveRef = useRef<string | null>(null);
+  const sawHitRef = useRef(false);
 
   useEffect(() => {
     if (!session) return;
     sawHitRef.current = false;
-    onDebug?.(`hit-test API: ${typeof session.requestHitTestSource === 'function' ? 'available' : 'MISSING'}`);
+    onDebug?.(
+      `hit-test API: ${typeof session.requestHitTestSource === 'function' ? 'available' : 'MISSING'}`,
+    );
   }, [session, onDebug]);
 
   useHitTest((hitMatrix) => {
     if (!sawHitRef.current) {
       sawHitRef.current = true;
-      onDebug?.('first hit-test result received');
+      onDebug?.('surface found - reticle is live');
     }
 
-    if (reticleRef.current) {
-      reticleRef.current.visible = true;
-      reticleRef.current.matrix.copy(hitMatrix);
+    const reticle = reticleRef.current;
+    if (reticle) {
+      reticle.visible = true;
+      reticle.matrix.copy(hitMatrix);
     }
 
-    const currentPoints = pointsRef.current;
+    const placed = corners;
+    const liveEdge = liveEdgeRef.current;
+    const drawingOutline = placed.length > 0 && placed.length < CORNER_COUNT;
 
-    // LIVE PREVIEW STATE
-    if (currentPoints.length === 1) {
-      const currentPosition = new THREE.Vector3().setFromMatrixPosition(hitMatrix);
-      const distance = currentPoints[0].distanceTo(currentPosition);
-      const { cm, inches } = calculateUnits(distance);
-      
-      onUpdate(cm, inches, 1);
-
-      if (liveLineRef.current) {
-        spanLine(liveLineRef.current, currentPoints[0], currentPosition);
+    if (!drawingOutline) {
+      if (liveEdge) liveEdge.visible = false;
+      if (lastLiveRef.current !== null) {
+        lastLiveRef.current = null;
+        onLiveEdge(null);
       }
+      return;
+    }
 
-      if (textRef.current) {
-        textRef.current.text = `${cm} cm\n(${inches}")`;
-        const midPoint = new THREE.Vector3().addVectors(currentPoints[0], currentPosition).multiplyScalar(0.5);
-        midPoint.y += 0.08; // Float slightly higher for readability
-        textRef.current.position.copy(midPoint);
-        textRef.current.visible = true;
+    const cursor = new THREE.Vector3().setFromMatrixPosition(hitMatrix);
+    const from = placed[placed.length - 1];
+    const distance = from.distanceTo(cursor);
+
+    if (liveEdge) {
+      if (distance < 1e-4) {
+        liveEdge.visible = false;
+      } else {
+        liveEdge.visible = true;
+        liveEdge.position.copy(midpoint(from, cursor));
+        liveEdge.quaternion.setFromUnitVectors(
+          UP,
+          new THREE.Vector3().subVectors(cursor, from).normalize(),
+        );
+        liveEdge.scale.set(1, distance, 1);
       }
+    }
+
+    const rounded = toUnits(distance).cm;
+    if (rounded !== lastLiveRef.current) {
+      lastLiveRef.current = rounded;
+      onLiveEdge(distance);
     }
   });
 
   const handleSelect = useCallback(() => {
-    if (!reticleRef.current || !reticleRef.current.visible) {
-      onDebug?.('tap ignored — no surface locked yet');
+    const reticle = reticleRef.current;
+    if (!reticle || !reticle.visible) {
+      onDebug?.('tap ignored - aim at a surface first');
       return;
     }
+    onAddCorner(new THREE.Vector3().setFromMatrixPosition(reticle.matrix));
+  }, [onAddCorner, onDebug]);
 
-    const position = new THREE.Vector3();
-    position.setFromMatrixPosition(reticleRef.current.matrix);
-
-    setPoints((prev) => {
-      if (prev.length === 0) {
-        onUpdate("0.0", "0.0", 1);
-        return [position];
-      } else if (prev.length === 1) {
-        const distance = prev[0].distanceTo(position);
-        const { cm, inches } = calculateUnits(distance);
-        onUpdate(cm, inches, 2);
-
-        if (liveLineRef.current) liveLineRef.current.visible = false;
-
-        if (textRef.current) {
-          textRef.current.text = `${cm} cm\n(${inches}")`;
-          const midPoint = new THREE.Vector3().addVectors(prev[0], position).multiplyScalar(0.5);
-          midPoint.y += 0.08;
-          textRef.current.position.copy(midPoint);
-          textRef.current.visible = true;
-        }
-        return [prev[0], position];
-      } else {
-        onUpdate("0.0", "0.0", 0);
-        if (textRef.current) textRef.current.visible = false;
-        if (liveLineRef.current) liveLineRef.current.visible = false;
-        return [position];
-      }
-    });
-  }, [onUpdate, onDebug]);
-
-  // Listen on the session directly. Handheld AR taps arrive as transient input
-  // sources, and the controller list they feed can be attached too late for a
-  // controller-level 'select' listener to catch the very tap that created it.
+  // Listen on the session itself. A phone tap arrives as a transient input
+  // source, and a controller-level listener can be attached a beat too late to
+  // catch the very tap that created it.
   useEffect(() => {
     if (!session) return;
     const listener = () => handleSelect();
@@ -133,31 +186,39 @@ export default function ARRuler({ onUpdate, onDebug }: ARRulerProps) {
     return () => session.removeEventListener('select', listener);
   }, [session, handleSelect]);
 
-  useFrame(({ camera }, delta) => {
-    if (innerCursorRef.current) {
-      innerCursorRef.current.rotation.z += delta * 1.5; // Faster, sleeker spin
-    }
-    if (textRef.current && textRef.current.visible) {
-      textRef.current.quaternion.copy(camera.quaternion); // Always face the user
-    }
+  useFrame((_, delta) => {
+    if (spinnerRef.current) spinnerRef.current.rotation.z += delta * 1.5;
   });
 
-  const lockedTubeGeometry = useMemo(() => {
-    if (points.length === 2) {
-      const path = new THREE.LineCurve3(points[0], points[1]);
-      return new THREE.TubeGeometry(path, 20, 0.003, 8, false);
-    }
-    return null;
-  }, [points]);
+  const edges = useMemo(() => outlineEdges(corners), [corners]);
+  const outlineColor = metrics ? (metrics.isRectangular ? '#10b981' : '#f59e0b') : '#38bdf8';
+
+  const lengthLabel = useMemo(() => {
+    if (!metrics) return null;
+    const units = toUnits(metrics.length);
+    return {
+      position: metrics.lengthAnchor.clone().setY(metrics.lengthAnchor.y + LABEL_LIFT),
+      text: `L  ${units.cm} cm\n${units.inches} in`,
+    };
+  }, [metrics]);
+
+  const breadthLabel = useMemo(() => {
+    if (!metrics) return null;
+    const units = toUnits(metrics.breadth);
+    return {
+      position: metrics.breadthAnchor.clone().setY(metrics.breadthAnchor.y + LABEL_LIFT),
+      text: `B  ${units.cm} cm\n${units.inches} in`,
+    };
+  }, [metrics]);
 
   return (
     <>
       <ambientLight intensity={2} />
       <directionalLight position={[1, 4, 2]} intensity={3} />
-      
-      {/* Precision Reticle */}
+
+      {/* Surface reticle */}
       <group ref={reticleRef} matrixAutoUpdate={false} visible={false}>
-        <mesh ref={innerCursorRef} rotation={[-Math.PI / 2, 0, 0]}>
+        <mesh ref={spinnerRef} rotation={[-Math.PI / 2, 0, 0]}>
           <ringGeometry args={[0.03, 0.035, 32]} />
           <meshBasicMaterial color="#38bdf8" transparent opacity={0.9} side={THREE.DoubleSide} />
         </mesh>
@@ -167,48 +228,66 @@ export default function ARRuler({ onUpdate, onDebug }: ARRulerProps) {
         </mesh>
       </group>
 
-      {/* Sleek Topographic Anchors */}
-      {points.map((p, i) => (
-        <group key={i} position={p}>
+      {/* Placed corners */}
+      {corners.map((corner, index) => (
+        <group key={index} position={corner}>
           <mesh position={[0, 0.001, 0]} rotation={[-Math.PI / 2, 0, 0]}>
             <ringGeometry args={[0.015, 0.02, 32]} />
-            <meshBasicMaterial color={i === 0 ? "#10b981" : "#ffffff"} transparent opacity={0.5} />
+            <meshBasicMaterial
+              color={index === 0 ? '#10b981' : '#ffffff'}
+              transparent
+              opacity={0.5}
+            />
           </mesh>
           <mesh>
-            <sphereGeometry args={[0.008, 32, 32]} />
-            <meshStandardMaterial color={i === 0 ? "#10b981" : "#ffffff"} roughness={0.1} metalness={0.5} />
+            <sphereGeometry args={[0.008, 16, 16]} />
+            <meshStandardMaterial
+              color={index === 0 ? '#10b981' : '#ffffff'}
+              roughness={0.1}
+              metalness={0.5}
+            />
           </mesh>
         </group>
       ))}
 
-      {/* Live Glowing Line — stretched every hit-test frame */}
-      <mesh ref={liveLineRef} visible={false}>
+      {/* Outline edges */}
+      {edges.map(([a, b], index) => (
+        <Segment key={index} a={a} b={b} color={outlineColor} opacity={0.9} />
+      ))}
+
+      {/* Live edge from the last corner to the reticle */}
+      <mesh ref={liveEdgeRef} visible={false}>
         <cylinderGeometry args={[0.003, 0.003, 1, 8]} />
         <meshBasicMaterial color="#38bdf8" transparent opacity={0.6} />
       </mesh>
 
-      {/* Locked Solid Tube */}
-      {points.length === 2 && lockedTubeGeometry && (
-        <mesh geometry={lockedTubeGeometry}>
-          <meshStandardMaterial color="#ffffff" emissive="#444444" roughness={0.2} metalness={0.8} />
-        </mesh>
+      {/* Diagonals, drawn once the shape closes so the match score is visible */}
+      {metrics && (
+        <>
+          <Segment
+            a={corners[0]}
+            b={corners[2]}
+            color={outlineColor}
+            radius={0.0015}
+            opacity={0.45}
+          />
+          <Segment
+            a={corners[1]}
+            b={corners[3]}
+            color={outlineColor}
+            radius={0.0015}
+            opacity={0.45}
+          />
+        </>
       )}
 
-      {/* High-Contrast Dual-Unit 3D Text */}
-      <Text
-        ref={textRef}
-        visible={false}
-        fontSize={0.05}
-        color="#ffffff"
-        outlineWidth={0.004}
-        outlineColor="#000000"
-        anchorX="center"
-        anchorY="middle"
-        textAlign="center"
-        lineHeight={1.2}
-      >
-        0.0 cm
-      </Text>
+      {/* Result labels */}
+      {lengthLabel && <Label position={lengthLabel.position}>{lengthLabel.text}</Label>}
+      {breadthLabel && (
+        <Label position={breadthLabel.position} color="#7dd3fc">
+          {breadthLabel.text}
+        </Label>
+      )}
     </>
   );
 }
