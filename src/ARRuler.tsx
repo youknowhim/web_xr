@@ -36,10 +36,6 @@ const STATS_INTERVAL_MS = 500;
 // Reused every frame so the render loop allocates nothing.
 const scratchMatrix = new THREE.Matrix4();
 const scratchCursor = new THREE.Vector3();
-const scratchDraw = new THREE.Vector3();
-const scratchNormal = new THREE.Vector3();
-const scratchDirection = new THREE.Vector3();
-const scratchQuaternion = new THREE.Quaternion();
 
 let nextCornerId = 1;
 
@@ -128,7 +124,6 @@ export default function ARRuler({
   onDebug,
 }: ARRulerProps) {
   const reticleRef = useRef<THREE.Group>(null);
-  const liveEdgeRef = useRef<THREE.Mesh>(null);
 
   const session = useXR((state) => state.session);
 
@@ -146,7 +141,11 @@ export default function ARRuler({
 
   // Graphics float just off the surface; measurements use the true points.
   const drawPoints = useMemo(() => corners.map(liftedPosition), [corners]);
-  const edges = useMemo(() => outlineEdges(drawPoints), [drawPoints]);
+  // Nothing is drawn between the dots until all four are down.
+  const edges = useMemo(
+    () => (drawPoints.length === CORNER_COUNT ? outlineEdges(drawPoints) : []),
+    [drawPoints],
+  );
 
   const anchorCount = useMemo(() => corners.filter((corner) => corner.anchor).length, [corners]);
 
@@ -163,7 +162,6 @@ export default function ARRuler({
     sawHitRef.current = false;
     lastHitAtRef.current = 0;
     pendingAnchorsRef.current = [];
-    if (liveEdgeRef.current) liveEdgeRef.current.visible = false;
     if (reticleRef.current) reticleRef.current.visible = false;
 
     const request = session.requestHitTestSource?.bind(session);
@@ -301,33 +299,6 @@ export default function ARRuler({
       if (surfaceFresh) reticle.matrix.copy(lastHitMatrixRef.current);
     }
 
-    // Live edge from the last placed corner out to the reticle.
-    const liveEdge = liveEdgeRef.current;
-    if (!surfaceFresh || corners.length === 0 || corners.length >= CORNER_COUNT) {
-      if (liveEdge) liveEdge.visible = false;
-    } else if (liveEdge) {
-      scratchMatrix.copy(lastHitMatrixRef.current);
-      scratchCursor.setFromMatrixPosition(scratchMatrix);
-      scratchNormal
-        .set(0, 1, 0)
-        .applyQuaternion(scratchQuaternion.setFromRotationMatrix(scratchMatrix));
-      scratchDraw.copy(scratchCursor).addScaledVector(scratchNormal, SURFACE_LIFT);
-
-      const from = drawPoints[drawPoints.length - 1];
-      const span = from.distanceTo(scratchDraw);
-      if (span < 1e-4) {
-        liveEdge.visible = false;
-      } else {
-        liveEdge.visible = true;
-        liveEdge.position.copy(from).add(scratchDraw).multiplyScalar(0.5);
-        liveEdge.quaternion.setFromUnitVectors(
-          UP,
-          scratchDirection.subVectors(scratchDraw, from).normalize(),
-        );
-        liveEdge.scale.set(1, span, 1);
-      }
-    }
-
     if (referenceSpace) {
       drainPendingAnchors(frame, referenceSpace);
 
@@ -415,16 +386,10 @@ export default function ARRuler({
         <CornerDot key={corner.id} position={drawPoints[index]} color={outlineColor} />
       ))}
 
-      {/* Outline */}
+      {/* Outline, drawn only once the fourth corner closes the shape */}
       {edges.map(([a, b], index) => (
         <Segment key={index} a={a} b={b} color={outlineColor} />
       ))}
-
-      {/* Live edge from the last corner to the reticle */}
-      <mesh ref={liveEdgeRef} visible={false} renderOrder={1}>
-        <cylinderGeometry args={[0.0018, 0.0018, 1, 8]} />
-        <meshBasicMaterial color={LINE_COLOR} transparent opacity={0.7} />
-      </mesh>
     </>
   );
 }
