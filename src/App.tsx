@@ -6,7 +6,6 @@ import {
   CheckCircledIcon,
   ExclamationTriangleIcon,
   InfoCircledIcon,
-  TargetIcon,
   TrashIcon,
 } from '@radix-ui/react-icons';
 import ARRuler from './ARRuler';
@@ -48,6 +47,7 @@ const SAFE_BOTTOM = 'calc(var(--safe-bottom) + 1rem)';
 
 function App() {
   const [corners, setCorners] = useState<Corner[]>([]);
+  const [liveEdge, setLiveEdge] = useState<number | null>(null);
   const [log, setLog] = useState<string[]>(initialDiagnostics);
   const [showLog, setShowLog] = useState(false);
   const [presenting, setPresenting] = useState(false);
@@ -76,7 +76,10 @@ function App() {
     navigator.vibrate?.(30);
   }, []);
 
-  const clear = useCallback(() => setCorners([]), []);
+  const clear = useCallback(() => {
+    setCorners([]);
+    setLiveEdge(null);
+  }, []);
 
   const showTrouble = useCallback(() => setShowLog(true), []);
   const undo = useCallback(() => setCorners((prev) => prev.slice(0, -1)), []);
@@ -117,12 +120,11 @@ function App() {
     return () => root.classList.remove('xr-presenting');
   }, [presenting]);
 
-  const instruction = (() => {
-    if (isComplete) return 'Tap anywhere to measure again';
-    if (corners.length === 0) return `Aim at corner 1 and tap - ${CORNER_COUNT} points needed`;
-    return `Point ${corners.length} locked - now aim at corner ${corners.length + 1}`;
-  })();
+  const instruction = isComplete
+    ? 'Tap anywhere to measure again'
+    : `Aim at a corner and tap - ${corners.length + 1} of ${CORNER_COUNT}`;
 
+  const liveUnits = liveEdge === null ? null : toUnits(liveEdge);
   const lengthUnits = metrics ? toUnits(metrics.length) : null;
   const breadthUnits = metrics ? toUnits(metrics.breadth) : null;
 
@@ -157,19 +159,11 @@ function App() {
             corners={ring}
             metrics={metrics}
             onAddCorner={addCorner}
+            onLiveEdge={setLiveEdge}
             onDebug={logLine}
           />
         </XR>
       </Canvas>
-
-      {/* Aiming crosshair - only while a corner is still to be placed */}
-      {!isComplete && (
-        <div className="pointer-events-none absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center opacity-60">
-          <div className="h-1.5 w-1.5 rounded-full bg-white shadow-[0_0_10px_rgba(255,255,255,1)]" />
-          <div className="absolute h-px w-9 bg-white/40" />
-          <div className="absolute h-9 w-px bg-white/40" />
-        </div>
-      )}
 
       {/* Readout */}
       <header
@@ -179,7 +173,6 @@ function App() {
       >
         <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-neutral-900/70 p-4 shadow-2xl backdrop-blur-xl">
           <div className="flex items-center gap-2">
-            <TargetIcon className="h-4 w-4 shrink-0 text-sky-400" />
             <h1 className="text-[10px] font-bold uppercase tracking-[0.2em] text-neutral-400">
               Spatial Ruler
             </h1>
@@ -225,14 +218,14 @@ function App() {
           ) : (
             <div className="mt-3">
               <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">
-                Points placed
+                {corners.length === 0 ? 'Ready' : `Edge ${corners.length}`}
               </div>
               <div className="truncate text-4xl font-black tracking-tight tabular-nums">
-                {corners.length}
-                <span className="ml-1 text-lg font-bold text-neutral-500">/ {CORNER_COUNT}</span>
+                {liveUnits ? liveUnits.cm : '0.0'}
+                <span className="ml-1 text-lg font-bold text-neutral-500">cm</span>
               </div>
-              <div className="truncate text-xs font-medium text-neutral-400">
-                Length and breadth appear once all {CORNER_COUNT} are placed
+              <div className="truncate text-xs font-medium tabular-nums text-sky-400/90">
+                {liveUnits ? liveUnits.inches : '0.0'} in
               </div>
             </div>
           )}
