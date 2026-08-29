@@ -25,4 +25,11 @@
     user-select: none;
     -webkit-tap-highlight-color: transparent;
   }
+
+  /* During immersive AR the DOM overlay is composited on top of the camera
+     feed, so any opaque background on the page hides the passthrough. */
+  html.xr-presenting,
+  html.xr-presenting body {
+    background: transparent !important;
+  }
 }

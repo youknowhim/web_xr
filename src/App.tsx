@@ -29,6 +29,7 @@ function App() {
   const [liveEdge, setLiveEdge] = useState<number | null>(null);
   const [log, setLog] = useState<string[]>(initialDiagnostics);
   const [showLog, setShowLog] = useState(false);
+  const [presenting, setPresenting] = useState(false);
 
   const metrics = useMemo(() => rectangleMetrics(corners), [corners]);
   const isComplete = corners.length === CORNER_COUNT;
@@ -85,6 +86,14 @@ function App() {
     return () => window.removeEventListener('unhandledrejection', onRejection);
   }, [logLine]);
 
+  // The DOM overlay sits on top of the camera feed, so the page has to go
+  // transparent for the duration of the session or it just shows black.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle('xr-presenting', presenting);
+    return () => root.classList.remove('xr-presenting');
+  }, [presenting]);
+
   const instruction = isComplete
     ? 'Tap anywhere to measure again'
     : `Aim at a corner and tap - ${corners.length + 1} of ${CORNER_COUNT}`;
@@ -94,15 +103,29 @@ function App() {
   const breadthUnits = metrics ? toUnits(metrics.breadth) : null;
 
   return (
-    <div className="fixed inset-0 overflow-hidden bg-neutral-950 text-white">
+    <div
+      className={`fixed inset-0 overflow-hidden text-white ${
+        presenting ? 'bg-transparent' : 'bg-neutral-950'
+      }`}
+    >
       {/* Camera + 3D scene */}
-      <Canvas className="absolute inset-0">
+      <Canvas
+        className="absolute inset-0"
+        gl={{ alpha: true, antialias: true, powerPreference: 'high-performance' }}
+        onCreated={({ gl }) => gl.setClearAlpha(0)}
+      >
         {/* 'local' is the reference space guaranteed for handheld AR;
             'local-floor' is not granted by default and makes setSession reject. */}
         <XR
           referenceSpace="local"
-          onSessionStart={() => logLine('session started')}
-          onSessionEnd={() => logLine('session ended')}
+          onSessionStart={() => {
+            setPresenting(true);
+            logLine('session started');
+          }}
+          onSessionEnd={() => {
+            setPresenting(false);
+            logLine('session ended');
+          }}
         >
           <ARRuler
             corners={corners}
