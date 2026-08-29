@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { ARButton, XR } from '@react-three/xr';
-import { ResetIcon, TargetIcon, InfoCircledIcon } from '@radix-ui/react-icons';
+import { ResetIcon, TargetIcon } from '@radix-ui/react-icons';
 import ARRuler from './ARRuler';
 
 function App() {
