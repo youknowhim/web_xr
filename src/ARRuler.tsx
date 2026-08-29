@@ -17,18 +17,10 @@ import type { Corner, RectangleMetrics } from './measure';
 const UP = new THREE.Vector3(0, 1, 0);
 const LABEL_LIFT = 0.07;
 
-// Reused every frame so the hit-test callback allocates nothing.
-const scratchCursor = new THREE.Vector3();
-const scratchDraw = new THREE.Vector3();
-const scratchNormal = new THREE.Vector3();
-const scratchDirection = new THREE.Vector3();
-const scratchQuaternion = new THREE.Quaternion();
-
 type ARRulerProps = {
   corners: Corner[];
   metrics: RectangleMetrics | null;
   onAddCorner: (corner: Corner) => void;
-  onLiveEdge: (meters: number | null) => void;
   onDebug?: (message: string) => void;
 };
 
@@ -110,22 +102,11 @@ function Label({
   );
 }
 
-export default function ARRuler({
-  corners,
-  metrics,
-  onAddCorner,
-  onLiveEdge,
-  onDebug,
-}: ARRulerProps) {
+export default function ARRuler({ corners, metrics, onAddCorner, onDebug }: ARRulerProps) {
   const reticleRef = useRef<THREE.Group>(null);
   const spinnerRef = useRef<THREE.Mesh>(null);
-  const liveEdgeRef = useRef<THREE.Mesh>(null);
 
   const session = useXR((state) => state.session);
-
-  // Only push a live length upward when the displayed value would actually
-  // change, so the HUD is not re-rendering 60 times a second.
-  const lastLiveRef = useRef<string | null>(null);
   const sawHitRef = useRef(false);
 
   // Graphics float just off the surface; measurements use the true points.
@@ -141,14 +122,14 @@ export default function ARRuler({
   useEffect(() => {
     if (!session) return;
     sawHitRef.current = false;
-    lastLiveRef.current = null;
-    if (liveEdgeRef.current) liveEdgeRef.current.visible = false;
     if (reticleRef.current) reticleRef.current.visible = false;
     onDebug?.(
       `hit-test API: ${typeof session.requestHitTestSource === 'function' ? 'available' : 'MISSING'}`,
     );
   }, [session, onDebug]);
 
+  // The reticle only tracks the surface under the crosshair. Nothing stretches
+  // or follows the phone: each tap drops a permanent point and that is all.
   useHitTest((hitMatrix) => {
     if (!sawHitRef.current) {
       sawHitRef.current = true;
@@ -156,50 +137,9 @@ export default function ARRuler({
     }
 
     const reticle = reticleRef.current;
-    if (reticle) {
-      reticle.visible = true;
-      reticle.matrix.copy(hitMatrix);
-    }
-
-    const liveEdge = liveEdgeRef.current;
-    const drawingOutline = corners.length > 0 && corners.length < CORNER_COUNT;
-
-    if (!drawingOutline) {
-      if (liveEdge) liveEdge.visible = false;
-      if (lastLiveRef.current !== null) {
-        lastLiveRef.current = null;
-        onLiveEdge(null);
-      }
-      return;
-    }
-
-    const last = corners[corners.length - 1];
-    scratchCursor.setFromMatrixPosition(hitMatrix);
-    const distance = last.position.distanceTo(scratchCursor);
-
-    if (liveEdge) {
-      if (distance < 1e-4) {
-        liveEdge.visible = false;
-      } else {
-        scratchNormal.set(0, 1, 0).applyQuaternion(scratchQuaternion.setFromRotationMatrix(hitMatrix));
-        scratchDraw.copy(scratchCursor).addScaledVector(scratchNormal, SURFACE_LIFT);
-
-        const from = drawPoints[drawPoints.length - 1];
-        liveEdge.visible = true;
-        liveEdge.position.copy(from).add(scratchDraw).multiplyScalar(0.5);
-        liveEdge.quaternion.setFromUnitVectors(
-          UP,
-          scratchDirection.subVectors(scratchDraw, from).normalize(),
-        );
-        liveEdge.scale.set(1, from.distanceTo(scratchDraw), 1);
-      }
-    }
-
-    const rounded = toUnits(distance).cm;
-    if (rounded !== lastLiveRef.current) {
-      lastLiveRef.current = rounded;
-      onLiveEdge(distance);
-    }
+    if (!reticle) return;
+    reticle.visible = true;
+    reticle.matrix.copy(hitMatrix);
   });
 
   const handleSelect = useCallback(() => {
@@ -273,7 +213,7 @@ export default function ARRuler({
         )}
       </group>
 
-      {/* Placed corners, oriented to the surface they landed on */}
+      {/* Placed points, oriented to the surface they landed on */}
       {corners.map((corner, index) => (
         <group key={index} position={drawPoints[index]} quaternion={corner.quaternion}>
           <mesh rotation={[-Math.PI / 2, 0, 0]} renderOrder={2}>
@@ -296,16 +236,10 @@ export default function ARRuler({
         </group>
       ))}
 
-      {/* Outline edges */}
+      {/* Edges between points that are already locked down */}
       {edges.map(([a, b], index) => (
         <Segment key={index} a={a} b={b} color={outlineColor} opacity={0.9} renderOrder={1} />
       ))}
-
-      {/* Live edge from the last corner to the reticle */}
-      <mesh ref={liveEdgeRef} visible={false} renderOrder={1}>
-        <cylinderGeometry args={[0.003, 0.003, 1, 8]} />
-        <meshBasicMaterial color="#38bdf8" transparent opacity={0.6} />
-      </mesh>
 
       {/* Diagonals, drawn once the shape closes so the match score is visible */}
       {metrics && (
