@@ -11,9 +11,17 @@ export const SURFACE_LIFT = 0.006;
 
 /** A tapped corner, plus the orientation of the surface it landed on. */
 export type Corner = {
+  /** Stable across pose updates, so an anchor can be matched back to its corner. */
+  id: number;
   position: THREE.Vector3;
   /** Local +Y points along the surface normal. */
   quaternion: THREE.Quaternion;
+  /**
+   * Pins the point to the real world. Without one, the point is stored in a
+   * reference space that the device quietly re-centres as it learns the room,
+   * which makes placed dots slide away as you move.
+   */
+  anchor?: XRAnchor;
 };
 
 export function surfaceNormal(corner: Corner): THREE.Vector3 {

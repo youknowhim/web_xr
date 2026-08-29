@@ -30,13 +30,13 @@ const AR_CONFIGS: ArConfig[] = [
   {
     label: 'hit-test + DOM overlay, both optional',
     init: {
-      optionalFeatures: ['hit-test', 'dom-overlay', 'local-floor'],
+      optionalFeatures: ['hit-test', 'dom-overlay', 'local-floor', 'anchors'],
       domOverlay: { root: document.body },
     },
   },
   {
     label: 'hit-test optional, no overlay',
-    init: { optionalFeatures: ['hit-test'] },
+    init: { optionalFeatures: ['hit-test', 'anchors'] },
   },
   {
     label: 'bare immersive-ar',

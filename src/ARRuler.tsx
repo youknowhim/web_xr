@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
-import { useHitTest, useXR } from '@react-three/xr';
+import { useXR } from '@react-three/xr';
 import { useFrame } from '@react-three/fiber';
 import { Text } from '@react-three/drei';
 import {
@@ -17,17 +17,30 @@ import type { Corner, RectangleMetrics } from './measure';
 const UP = new THREE.Vector3(0, 1, 0);
 const LABEL_LIFT = 0.07;
 
-// Reused every frame so the hit-test callback allocates nothing.
+/** Hit-test setup can lose the race with session startup, so it gets retries. */
+const HIT_SOURCE_TRIES = 6;
+const HIT_SOURCE_BACKOFF = 400;
+
+/** Anchor poses are re-read on this cadence, and applied past this movement. */
+const ANCHOR_SYNC_FRAMES = 10;
+const ANCHOR_MOVE_EPSILON = 0.001;
+
+// Reused every frame so the render loop allocates nothing.
+const scratchMatrix = new THREE.Matrix4();
 const scratchCursor = new THREE.Vector3();
 const scratchDraw = new THREE.Vector3();
 const scratchNormal = new THREE.Vector3();
 const scratchDirection = new THREE.Vector3();
 const scratchQuaternion = new THREE.Quaternion();
 
+let nextCornerId = 1;
+
 type ARRulerProps = {
   corners: Corner[];
   metrics: RectangleMetrics | null;
   onAddCorner: (corner: Corner) => void;
+  onAttachAnchor: (id: number, anchor: XRAnchor) => void;
+  onCornersUpdate: (corners: Corner[]) => void;
   onLiveEdge: (meters: number | null) => void;
   onDebug?: (message: string) => void;
 };
@@ -114,6 +127,8 @@ export default function ARRuler({
   corners,
   metrics,
   onAddCorner,
+  onAttachAnchor,
+  onCornersUpdate,
   onLiveEdge,
   onDebug,
 }: ARRulerProps) {
@@ -123,10 +138,14 @@ export default function ARRuler({
 
   const session = useXR((state) => state.session);
 
+  const hitSourceRef = useRef<XRHitTestSource | null>(null);
+  const hitResultRef = useRef<XRHitTestResult | null>(null);
+  const sawHitRef = useRef(false);
+  const frameCountRef = useRef(0);
+
   // Only push a live length upward when the displayed value would actually
   // change, so the HUD is not re-rendering 60 times a second.
   const lastLiveRef = useRef<string | null>(null);
-  const sawHitRef = useRef(false);
 
   // Graphics float just off the surface; measurements use the true points.
   const drawPoints = useMemo(() => corners.map(liftedPosition), [corners]);
@@ -138,31 +157,126 @@ export default function ARRuler({
     return normal.lengthSq() < 1e-9 ? new THREE.Vector3(0, 1, 0) : normal.normalize();
   }, [corners]);
 
+  /**
+   * Acquire the hit-test source, with retries.
+   *
+   * requestHitTestSource() can reject if it is called before the session has
+   * finished coming up. One rejection used to leave the reticle dead for the
+   * whole session with nothing on screen to say why - which is exactly the
+   * "sometimes the ring never appears" case.
+   */
   useEffect(() => {
     if (!session) return;
+
     sawHitRef.current = false;
     lastLiveRef.current = null;
+    hitResultRef.current = null;
     if (liveEdgeRef.current) liveEdgeRef.current.visible = false;
     if (reticleRef.current) reticleRef.current.visible = false;
-    onDebug?.(
-      `hit-test API: ${typeof session.requestHitTestSource === 'function' ? 'available' : 'MISSING'}`,
-    );
+
+    const request = session.requestHitTestSource?.bind(session);
+    if (!request) {
+      onDebug?.('hit-test API MISSING on this session');
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const acquire = (attempt: number) => {
+      session
+        .requestReferenceSpace('viewer')
+        .then((viewer) => request({ space: viewer }))
+        .then((source) => {
+          if (!source) throw new Error('no hit-test source returned');
+          if (cancelled) {
+            source.cancel();
+            return;
+          }
+          hitSourceRef.current = source;
+          onDebug?.(`hit-test source ready (try ${attempt})`);
+        })
+        .catch((error: Error) => {
+          if (cancelled) return;
+          onDebug?.(`hit-test source failed (try ${attempt}): ${error.name}: ${error.message}`);
+          if (attempt < HIT_SOURCE_TRIES) {
+            timer = setTimeout(() => acquire(attempt + 1), HIT_SOURCE_BACKOFF * attempt);
+          } else {
+            onDebug?.('hit-test unavailable - surfaces cannot be detected');
+          }
+        });
+    };
+
+    acquire(1);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      hitSourceRef.current?.cancel();
+      hitSourceRef.current = null;
+    };
   }, [session, onDebug]);
 
-  useHitTest((hitMatrix) => {
-    if (!sawHitRef.current) {
-      sawHitRef.current = true;
-      onDebug?.('surface found - reticle is live');
-    }
+  /** Re-read anchored corners so they stay put as the device corrects itself. */
+  const syncAnchors = useCallback(
+    (frame: XRFrame, referenceSpace: XRReferenceSpace) => {
+      let changed = false;
 
+      const next = corners.map((corner) => {
+        if (!corner.anchor) return corner;
+
+        const pose = frame.getPose(corner.anchor.anchorSpace, referenceSpace);
+        if (!pose) return corner;
+
+        scratchMatrix.fromArray(pose.transform.matrix);
+        scratchCursor.setFromMatrixPosition(scratchMatrix);
+        if (scratchCursor.distanceTo(corner.position) < ANCHOR_MOVE_EPSILON) return corner;
+
+        changed = true;
+        return {
+          ...corner,
+          position: scratchCursor.clone(),
+          quaternion: new THREE.Quaternion().setFromRotationMatrix(scratchMatrix),
+        };
+      });
+
+      if (changed) onCornersUpdate(next);
+    },
+    [corners, onCornersUpdate],
+  );
+
+  useFrame((state, delta, frame) => {
+    if (spinnerRef.current) spinnerRef.current.rotation.z += delta * 1.5;
+    if (!frame) return;
+
+    const referenceSpace = state.gl.xr.getReferenceSpace();
+    if (!referenceSpace) return;
+
+    const source = hitSourceRef.current;
+    const [hit] = source ? frame.getHitTestResults(source) : [];
+    const pose = hit?.getPose(referenceSpace);
     const reticle = reticleRef.current;
-    if (reticle) {
-      reticle.visible = true;
-      reticle.matrix.copy(hitMatrix);
+
+    if (!pose) {
+      // No surface under the crosshair: stop showing a stale reticle.
+      hitResultRef.current = null;
+      if (reticle) reticle.visible = false;
+    } else {
+      if (!sawHitRef.current) {
+        sawHitRef.current = true;
+        onDebug?.('surface found - reticle is live');
+      }
+      hitResultRef.current = hit;
+      scratchMatrix.fromArray(pose.transform.matrix);
+      if (reticle) {
+        reticle.visible = true;
+        reticle.matrix.copy(scratchMatrix);
+      }
     }
 
+    // Live edge from the last placed corner out to the reticle.
     const liveEdge = liveEdgeRef.current;
-    const drawingOutline = corners.length > 0 && corners.length < CORNER_COUNT;
+    const drawingOutline = pose && corners.length > 0 && corners.length < CORNER_COUNT;
 
     if (!drawingOutline) {
       if (liveEdge) liveEdge.visible = false;
@@ -170,37 +284,41 @@ export default function ARRuler({
         lastLiveRef.current = null;
         onLiveEdge(null);
       }
-      return;
-    }
+    } else {
+      const last = corners[corners.length - 1];
+      scratchCursor.setFromMatrixPosition(scratchMatrix);
+      const distance = last.position.distanceTo(scratchCursor);
 
-    const last = corners[corners.length - 1];
-    scratchCursor.setFromMatrixPosition(hitMatrix);
-    const distance = last.position.distanceTo(scratchCursor);
+      if (liveEdge) {
+        if (distance < 1e-4) {
+          liveEdge.visible = false;
+        } else {
+          scratchNormal
+            .set(0, 1, 0)
+            .applyQuaternion(scratchQuaternion.setFromRotationMatrix(scratchMatrix));
+          scratchDraw.copy(scratchCursor).addScaledVector(scratchNormal, SURFACE_LIFT);
 
-    if (liveEdge) {
-      if (distance < 1e-4) {
-        liveEdge.visible = false;
-      } else {
-        scratchNormal
-          .set(0, 1, 0)
-          .applyQuaternion(scratchQuaternion.setFromRotationMatrix(hitMatrix));
-        scratchDraw.copy(scratchCursor).addScaledVector(scratchNormal, SURFACE_LIFT);
+          const from = drawPoints[drawPoints.length - 1];
+          liveEdge.visible = true;
+          liveEdge.position.copy(from).add(scratchDraw).multiplyScalar(0.5);
+          liveEdge.quaternion.setFromUnitVectors(
+            UP,
+            scratchDirection.subVectors(scratchDraw, from).normalize(),
+          );
+          liveEdge.scale.set(1, from.distanceTo(scratchDraw), 1);
+        }
+      }
 
-        const from = drawPoints[drawPoints.length - 1];
-        liveEdge.visible = true;
-        liveEdge.position.copy(from).add(scratchDraw).multiplyScalar(0.5);
-        liveEdge.quaternion.setFromUnitVectors(
-          UP,
-          scratchDirection.subVectors(scratchDraw, from).normalize(),
-        );
-        liveEdge.scale.set(1, from.distanceTo(scratchDraw), 1);
+      const rounded = toUnits(distance).cm;
+      if (rounded !== lastLiveRef.current) {
+        lastLiveRef.current = rounded;
+        onLiveEdge(distance);
       }
     }
 
-    const rounded = toUnits(distance).cm;
-    if (rounded !== lastLiveRef.current) {
-      lastLiveRef.current = rounded;
-      onLiveEdge(distance);
+    frameCountRef.current += 1;
+    if (frameCountRef.current % ANCHOR_SYNC_FRAMES === 0) {
+      syncAnchors(frame, referenceSpace);
     }
   });
 
@@ -210,11 +328,25 @@ export default function ARRuler({
       onDebug?.('tap ignored - aim at a surface first');
       return;
     }
+
+    const id = nextCornerId++;
     onAddCorner({
+      id,
       position: new THREE.Vector3().setFromMatrixPosition(reticle.matrix),
       quaternion: new THREE.Quaternion().setFromRotationMatrix(reticle.matrix),
     });
-  }, [onAddCorner, onDebug]);
+
+    // Pin it to the real world so it does not slide as tracking is refined.
+    const hit = hitResultRef.current;
+    const createAnchor = hit?.createAnchor?.bind(hit);
+    if (!createAnchor) {
+      onDebug?.('anchors unavailable - points may drift');
+      return;
+    }
+    createAnchor()
+      .then((anchor) => onAttachAnchor(id, anchor))
+      .catch((error: Error) => onDebug?.(`anchor failed: ${error.name}: ${error.message}`));
+  }, [onAddCorner, onAttachAnchor, onDebug]);
 
   // Listen on the session itself. A phone tap arrives as a transient input
   // source, and a controller-level listener can be attached a beat too late to
@@ -225,10 +357,6 @@ export default function ARRuler({
     session.addEventListener('select', listener);
     return () => session.removeEventListener('select', listener);
   }, [session, handleSelect]);
-
-  useFrame((_, delta) => {
-    if (spinnerRef.current) spinnerRef.current.rotation.z += delta * 1.5;
-  });
 
   const outlineColor = metrics ? (metrics.isRectangular ? '#10b981' : '#f59e0b') : '#38bdf8';
 
@@ -277,7 +405,7 @@ export default function ARRuler({
 
       {/* Placed corners, oriented to the surface they landed on */}
       {corners.map((corner, index) => (
-        <group key={index} position={drawPoints[index]} quaternion={corner.quaternion}>
+        <group key={corner.id} position={drawPoints[index]} quaternion={corner.quaternion}>
           <mesh rotation={[-Math.PI / 2, 0, 0]} renderOrder={2}>
             <ringGeometry args={[0.014, 0.019, 32]} />
             <meshBasicMaterial

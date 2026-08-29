@@ -42,6 +42,15 @@ function useBlockXrSelect<T extends HTMLElement>() {
   return ref;
 }
 
+/** Anchors are a device resource; hand them back when a point goes away. */
+function releaseAnchor(corner: Corner) {
+  try {
+    corner.anchor?.delete();
+  } catch {
+    // Already gone with the session - nothing to release.
+  }
+}
+
 const SAFE_TOP = 'calc(var(--safe-top) + 0.75rem)';
 const SAFE_BOTTOM = 'calc(var(--safe-bottom) + 1rem)';
 
@@ -77,12 +86,35 @@ function App() {
   }, []);
 
   const clear = useCallback(() => {
-    setCorners([]);
+    setCorners((prev) => {
+      for (const corner of prev) releaseAnchor(corner);
+      return [];
+    });
     setLiveEdge(null);
   }, []);
 
+  /** A resolved anchor arrives after the corner it belongs to is already drawn. */
+  const attachAnchor = useCallback((id: number, anchor: XRAnchor) => {
+    setCorners((prev) =>
+      prev.map((corner) => (corner.id === id ? { ...corner, anchor } : corner)),
+    );
+  }, []);
+
+  /** Anchored corners are re-posed every few frames; match them back by id. */
+  const updateCorners = useCallback((updated: Corner[]) => {
+    setCorners((prev) =>
+      prev.map((corner) => updated.find((entry) => entry.id === corner.id) ?? corner),
+    );
+  }, []);
+
   const showTrouble = useCallback(() => setShowLog(true), []);
-  const undo = useCallback(() => setCorners((prev) => prev.slice(0, -1)), []);
+  const undo = useCallback(() => {
+    setCorners((prev) => {
+      const last = prev[prev.length - 1];
+      if (last) releaseAnchor(last);
+      return prev.slice(0, -1);
+    });
+  }, []);
 
   useEffect(() => {
     if (!navigator.xr) return;
@@ -159,6 +191,8 @@ function App() {
             corners={ring}
             metrics={metrics}
             onAddCorner={addCorner}
+            onAttachAnchor={attachAnchor}
+            onCornersUpdate={updateCorners}
             onLiveEdge={setLiveEdge}
             onDebug={logLine}
           />
