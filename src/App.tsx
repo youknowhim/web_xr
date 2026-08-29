@@ -1,13 +1,53 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { ARButton, XR } from '@react-three/xr';
-import { ResetIcon, TargetIcon } from '@radix-ui/react-icons';
+import { ResetIcon, TargetIcon, InfoCircledIcon } from '@radix-ui/react-icons';
 import ARRuler from './ARRuler';
 
 function App() {
   const [cm, setCm] = useState<string>("0.0");
   const [inches, setInches] = useState<string>("0.0");
   const [step, setStep] = useState<number>(0);
+  const [log, setLog] = useState<string[]>([]);
+  const [showLog, setShowLog] = useState<boolean>(false);
+
+  const logLine = useCallback((message: string) => {
+    setLog((prev) => [...prev.slice(-19), message]);
+  }, []);
+
+  // Hit-test is what makes measuring possible, so request it as a required
+  // feature: if the device can't provide it we get a loud rejection instead of
+  // a session that silently never produces a reticle.
+  const sessionInit = useMemo<XRSessionInit>(() => ({
+    requiredFeatures: ['hit-test'],
+    optionalFeatures: ['dom-overlay', 'dom-overlay-for-handheld-ar', 'local-floor', 'anchors'],
+    domOverlay: { root: document.body },
+  }), []);
+
+  useEffect(() => {
+    logLine(`secure: ${window.isSecureContext} (${location.protocol})`);
+    if (!navigator.xr) {
+      logLine('navigator.xr: MISSING — no WebXR in this browser');
+      return;
+    }
+    logLine('navigator.xr: present');
+    navigator.xr.isSessionSupported('immersive-ar')
+      .then((ok) => logLine(`immersive-ar: ${ok ? 'supported' : 'NOT supported — ARCore missing?'}`))
+      .catch((e: Error) => logLine(`isSessionSupported: ${e.name}: ${e.message}`));
+  }, [logLine]);
+
+  // The library fires startSession() without awaiting it, so a rejected
+  // requestSession() (permission denied, ARCore install cancelled, unsupported
+  // feature) only ever shows up as an unhandled rejection.
+  useEffect(() => {
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      logLine(`FAILED: ${reason?.name ?? 'Error'}: ${reason?.message ?? String(reason)}`);
+      setShowLog(true);
+    };
+    window.addEventListener('unhandledrejection', onRejection);
+    return () => window.removeEventListener('unhandledrejection', onRejection);
+  }, [logLine]);
 
   const getInstructions = () => {
     if (step === 0) return "Aim down at surface and tap.";
@@ -48,6 +88,23 @@ function App() {
         </div>
       </div>
 
+      {/* Diagnostics Panel */}
+      {showLog && (
+        <div className="absolute bottom-32 left-1/2 -translate-x-1/2 w-[92%] max-w-sm z-30 p-4 rounded-2xl bg-black/85 backdrop-blur-xl border border-white/15 text-[10px] leading-relaxed font-mono text-neutral-300 max-h-64 overflow-y-auto">
+          {log.map((line, i) => (
+            <div key={i} className={line.startsWith('FAILED') || line.includes('MISSING') || line.includes('NOT supported') ? 'text-rose-400' : ''}>{line}</div>
+          ))}
+        </div>
+      )}
+
+      {/* Diagnostics Toggle */}
+      <button
+        onClick={() => setShowLog((v) => !v)}
+        className="absolute bottom-10 right-24 z-30 p-4 bg-neutral-900/60 backdrop-blur-xl border border-white/10 shadow-2xl text-neutral-300 hover:text-white rounded-full transition-all active:scale-95"
+      >
+        <InfoCircledIcon className="w-6 h-6" />
+      </button>
+
       {/* Reset / Clear Button */}
       <button 
         onClick={() => window.location.reload()}
@@ -58,13 +115,26 @@ function App() {
 
       {/* Enter AR Button */}
       <ARButton 
+        style={{}}
+        sessionInit={sessionInit}
+        onClick={() => logLine('tapped Enter AR')}
+        onError={(e) => { logLine(`ARButton: ${e.name}: ${e.message}`); setShowLog(true); }}
         className="absolute bottom-10 left-8 z-10 px-8 py-4 rounded-2xl bg-sky-600/90 backdrop-blur-xl border border-sky-400/50 text-white shadow-[0_0_30px_rgba(14,165,233,0.3)] font-bold tracking-wide transition-all active:scale-95"
       />
 
       {/* 3D Scene */}
       <Canvas>
-        <XR>
-          <ARRuler onUpdate={(c, i, s) => { setCm(c); setInches(i); setStep(s); }} />
+        {/* 'local' is the reference space guaranteed for handheld AR; 'local-floor'
+            is not granted by default and makes setSession() reject outright. */}
+        <XR
+          referenceSpace="local"
+          onSessionStart={() => logLine('session started')}
+          onSessionEnd={() => logLine('session ended')}
+        >
+          <ARRuler
+            onUpdate={(c, i, s) => { setCm(c); setInches(i); setStep(s); }}
+            onDebug={logLine}
+          />
         </XR>
       </Canvas>
       
