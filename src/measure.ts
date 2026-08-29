@@ -6,6 +6,32 @@ export const RECTANGLE_TOLERANCE = 95;
 /** Number of corners the user taps to complete a measurement. */
 export const CORNER_COUNT = 4;
 
+/** How far above the surface the graphics float, in metres. */
+export const SURFACE_LIFT = 0.006;
+
+/** A tapped corner, plus the orientation of the surface it landed on. */
+export type Corner = {
+  position: THREE.Vector3;
+  /** Local +Y points along the surface normal. */
+  quaternion: THREE.Quaternion;
+};
+
+export function surfaceNormal(corner: Corner): THREE.Vector3 {
+  return new THREE.Vector3(0, 1, 0).applyQuaternion(corner.quaternion);
+}
+
+/**
+ * Where a corner's graphics should be drawn.
+ *
+ * Measurements use the true surface point, but a marker or a tube centred on
+ * that point is half buried in the surface, so anything drawn is floated a few
+ * millimetres along the normal. That also keeps coincident geometry - the
+ * reticle sitting on a placed corner, say - from z-fighting.
+ */
+export function liftedPosition(corner: Corner): THREE.Vector3 {
+  return corner.position.clone().addScaledVector(surfaceNormal(corner), SURFACE_LIFT);
+}
+
 export type Units = {
   cm: string;
   inches: string;
@@ -29,10 +55,13 @@ export function midpoint(a: THREE.Vector3, b: THREE.Vector3): THREE.Vector3 {
  * "sides" are really the diagonals. That measures the wrong distances *and*
  * still scores 100%, because the true diagonals become equal sides. Sorting
  * the corners by angle around their centroid, in their own plane, yields a
- * simple quadrilateral whatever order they were tapped in.
+ * simple quadrilateral whatever order they were tapped in. Returns the
+ * permutation rather than the points, so the caller can reorder whatever it
+ * keeps alongside them.
  */
-export function orderCorners(corners: THREE.Vector3[]): THREE.Vector3[] {
-  if (corners.length !== CORNER_COUNT) return corners;
+export function ringOrder(corners: THREE.Vector3[]): number[] {
+  const identity = corners.map((_, index) => index);
+  if (corners.length !== CORNER_COUNT) return identity;
 
   const centroid = new THREE.Vector3();
   for (const corner of corners) centroid.add(corner);
@@ -53,14 +82,14 @@ export function orderCorners(corners: THREE.Vector3[]): THREE.Vector3[] {
       .cross(new THREE.Vector3().subVectors(corners[k], corners[i]));
     if (candidate.lengthSq() > normal.lengthSq()) normal.copy(candidate);
   }
-  if (normal.lengthSq() < 1e-12) return corners;
+  if (normal.lengthSq() < 1e-12) return identity;
   normal.normalize();
 
   // In-plane basis, with the first corner defining the zero angle.
   const xAxis = new THREE.Vector3()
     .subVectors(corners[0], centroid)
     .projectOnPlane(normal);
-  if (xAxis.lengthSq() < 1e-12) return corners;
+  if (xAxis.lengthSq() < 1e-12) return identity;
   xAxis.normalize();
   const yAxis = new THREE.Vector3().crossVectors(normal, xAxis);
 
@@ -69,7 +98,7 @@ export function orderCorners(corners: THREE.Vector3[]): THREE.Vector3[] {
     return Math.atan2(offset.dot(yAxis), offset.dot(xAxis));
   };
 
-  return [...corners].sort((a, b) => angleOf(a) - angleOf(b));
+  return identity.sort((a, b) => angleOf(corners[a]) - angleOf(corners[b]));
 }
 
 export type RectangleMetrics = {

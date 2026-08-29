@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type * as THREE from 'three';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { XR } from '@react-three/xr';
 import {
@@ -12,13 +11,8 @@ import {
 } from '@radix-ui/react-icons';
 import ARRuler from './ARRuler';
 import EnterArButton from './EnterArButton';
-import {
-  CORNER_COUNT,
-  RECTANGLE_TOLERANCE,
-  orderCorners,
-  rectangleMetrics,
-  toUnits,
-} from './measure';
+import { CORNER_COUNT, RECTANGLE_TOLERANCE, rectangleMetrics, ringOrder, toUnits } from './measure';
+import type { Corner } from './measure';
 
 /** Everything we can learn about WebXR support without awaiting anything. */
 function initialDiagnostics(): string[] {
@@ -28,34 +22,67 @@ function initialDiagnostics(): string[] {
   ];
 }
 
+/**
+ * Stop taps on this element from also placing a corner.
+ *
+ * With `dom-overlay`, tapping the UI still fires the session's `select` event
+ * unless the page cancels `beforexrselect` first - so without this, pressing
+ * Undo also counts as a tap on the world behind it.
+ */
+function useBlockXrSelect<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const block = (event: Event) => event.preventDefault();
+    node.addEventListener('beforexrselect', block);
+    return () => node.removeEventListener('beforexrselect', block);
+  }, []);
+
+  return ref;
+}
+
 const SAFE_TOP = 'calc(var(--safe-top) + 0.75rem)';
 const SAFE_BOTTOM = 'calc(var(--safe-bottom) + 1rem)';
 
 function App() {
-  const [corners, setCorners] = useState<THREE.Vector3[]>([]);
+  const [corners, setCorners] = useState<Corner[]>([]);
   const [liveEdge, setLiveEdge] = useState<number | null>(null);
   const [log, setLog] = useState<string[]>(initialDiagnostics);
   const [showLog, setShowLog] = useState(false);
   const [presenting, setPresenting] = useState(false);
 
+  const headerRef = useBlockXrSelect<HTMLElement>();
+  const footerRef = useBlockXrSelect<HTMLElement>();
+  const logRef = useBlockXrSelect<HTMLDivElement>();
+
   // Corners are measured in ring order, not tap order, so tapping them out of
   // sequence still describes the same shape.
-  const ring = useMemo(() => orderCorners(corners), [corners]);
-  const metrics = useMemo(() => rectangleMetrics(ring), [ring]);
+  const ring = useMemo(() => {
+    const order = ringOrder(corners.map((corner) => corner.position));
+    return order.map((index) => corners[index]);
+  }, [corners]);
+
+  const metrics = useMemo(() => rectangleMetrics(ring.map((corner) => corner.position)), [ring]);
+
   const isComplete = corners.length === CORNER_COUNT;
 
   const logLine = useCallback((message: string) => {
     setLog((prev) => [...prev.slice(-19), message]);
   }, []);
 
-  const addCorner = useCallback((corner: THREE.Vector3) => {
+  const addCorner = useCallback((corner: Corner) => {
     setCorners((prev) => (prev.length >= CORNER_COUNT ? [corner] : [...prev, corner]));
   }, []);
 
-  const showTrouble = useCallback(() => setShowLog(true), []);
+  const clear = useCallback(() => {
+    setCorners([]);
+    setLiveEdge(null);
+  }, []);
 
+  const showTrouble = useCallback(() => setShowLog(true), []);
   const undo = useCallback(() => setCorners((prev) => prev.slice(0, -1)), []);
-  const reset = useCallback(() => setCorners([]), []);
 
   useEffect(() => {
     if (!navigator.xr) return;
@@ -119,11 +146,13 @@ function App() {
           referenceSpace="local"
           onSessionStart={() => {
             setPresenting(true);
+            clear();
             logLine('session started');
           }}
           onSessionEnd={() => {
             setPresenting(false);
-            logLine('session ended');
+            clear();
+            logLine('session ended - measurement cleared');
           }}
         >
           <ARRuler
@@ -136,16 +165,19 @@ function App() {
         </XR>
       </Canvas>
 
-      {/* Aiming crosshair */}
-      <div className="pointer-events-none absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center opacity-60">
-        <div className="h-1.5 w-1.5 rounded-full bg-white shadow-[0_0_10px_rgba(255,255,255,1)]" />
-        <div className="absolute h-px w-9 bg-white/40" />
-        <div className="absolute h-9 w-px bg-white/40" />
-      </div>
+      {/* Aiming crosshair - only while a corner is still to be placed */}
+      {!isComplete && (
+        <div className="pointer-events-none absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center opacity-60">
+          <div className="h-1.5 w-1.5 rounded-full bg-white shadow-[0_0_10px_rgba(255,255,255,1)]" />
+          <div className="absolute h-px w-9 bg-white/40" />
+          <div className="absolute h-9 w-px bg-white/40" />
+        </div>
+      )}
 
       {/* Readout */}
       <header
-        className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center px-3"
+        ref={headerRef}
+        className="absolute inset-x-0 top-0 z-20 flex justify-center px-3"
         style={{ paddingTop: SAFE_TOP }}
       >
         <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-neutral-900/70 p-4 shadow-2xl backdrop-blur-xl">
@@ -250,6 +282,7 @@ function App() {
       {/* Diagnostics */}
       {showLog && (
         <div
+          ref={logRef}
           className="absolute inset-x-0 z-30 flex justify-center px-3"
           style={{ bottom: `calc(${SAFE_BOTTOM} + 4.5rem)` }}
         >
@@ -272,6 +305,7 @@ function App() {
 
       {/* Controls */}
       <footer
+        ref={footerRef}
         className="absolute inset-x-0 bottom-0 z-30 px-3"
         style={{ paddingBottom: SAFE_BOTTOM }}
       >
@@ -295,7 +329,7 @@ function App() {
 
           <button
             type="button"
-            onClick={reset}
+            onClick={clear}
             disabled={corners.length === 0}
             aria-label="Clear measurement"
             className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-neutral-900/70 text-neutral-300 shadow-2xl backdrop-blur-xl transition active:scale-95 disabled:opacity-30"
