@@ -45,6 +45,11 @@ export type Units = {
   inches: string;
 };
 
+/** Metres, the unit shown on screen. */
+export function toMeters(meters: number): string {
+  return meters.toFixed(2);
+}
+
 export function toUnits(meters: number): Units {
   return {
     cm: (meters * 100).toFixed(1),

@@ -1,16 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { XR } from '@react-three/xr';
-import {
-  ArrowLeftIcon,
-  CheckCircledIcon,
-  ExclamationTriangleIcon,
-  InfoCircledIcon,
-  TrashIcon,
-} from '@radix-ui/react-icons';
 import ARRuler from './ARRuler';
-import EnterArButton from './EnterArButton';
-import { CORNER_COUNT, RECTANGLE_TOLERANCE, rectangleMetrics, ringOrder, toUnits } from './measure';
+import { IDLE_STATS } from './stats';
+import type { RuntimeStats } from './stats';
+import MeasureOverlay from './MeasureOverlay';
+import Onboarding from './Onboarding';
+import { useArSession } from './useArSession';
+import { CORNER_COUNT, rectangleMetrics, ringOrder } from './measure';
 import type { Corner } from './measure';
 
 /** Everything we can learn about WebXR support without awaiting anything. */
@@ -19,27 +16,6 @@ function initialDiagnostics(): string[] {
     `secure: ${window.isSecureContext} (${location.protocol})`,
     navigator.xr ? 'navigator.xr: present' : 'navigator.xr: MISSING - no WebXR in this browser',
   ];
-}
-
-/**
- * Stop taps on this element from also placing a corner.
- *
- * With `dom-overlay`, tapping the UI still fires the session's `select` event
- * unless the page cancels `beforexrselect` first - so without this, pressing
- * Undo also counts as a tap on the world behind it.
- */
-function useBlockXrSelect<T extends HTMLElement>() {
-  const ref = useRef<T>(null);
-
-  useEffect(() => {
-    const node = ref.current;
-    if (!node) return;
-    const block = (event: Event) => event.preventDefault();
-    node.addEventListener('beforexrselect', block);
-    return () => node.removeEventListener('beforexrselect', block);
-  }, []);
-
-  return ref;
 }
 
 /** Anchors are a device resource; hand them back when a point goes away. */
@@ -51,19 +27,12 @@ function releaseAnchor(corner: Corner) {
   }
 }
 
-const SAFE_TOP = 'calc(var(--safe-top) + 0.75rem)';
-const SAFE_BOTTOM = 'calc(var(--safe-bottom) + 1rem)';
-
 function App() {
   const [corners, setCorners] = useState<Corner[]>([]);
-  const [liveEdge, setLiveEdge] = useState<number | null>(null);
+  const [presenting, setPresenting] = useState(false);
+  const [stats, setStats] = useState<RuntimeStats>(IDLE_STATS);
   const [log, setLog] = useState<string[]>(initialDiagnostics);
   const [showLog, setShowLog] = useState(false);
-  const [presenting, setPresenting] = useState(false);
-
-  const headerRef = useBlockXrSelect<HTMLElement>();
-  const footerRef = useBlockXrSelect<HTMLElement>();
-  const logRef = useBlockXrSelect<HTMLDivElement>();
 
   // Corners are measured in ring order, not tap order, so tapping them out of
   // sequence still describes the same shape.
@@ -74,30 +43,22 @@ function App() {
 
   const metrics = useMemo(() => rectangleMetrics(ring.map((corner) => corner.position)), [ring]);
 
-  const isComplete = corners.length === CORNER_COUNT;
-
   const logLine = useCallback((message: string) => {
     setLog((prev) => [...prev.slice(-19), message]);
   }, []);
 
+  const showTrouble = useCallback(() => setShowLog(true), []);
+
+  const session = useArSession(logLine, showTrouble);
+
   const addCorner = useCallback((corner: Corner) => {
     setCorners((prev) => (prev.length >= CORNER_COUNT ? [corner] : [...prev, corner]));
-    navigator.vibrate?.(30);
-  }, []);
-
-  const clear = useCallback(() => {
-    setCorners((prev) => {
-      for (const corner of prev) releaseAnchor(corner);
-      return [];
-    });
-    setLiveEdge(null);
+    navigator.vibrate?.(25);
   }, []);
 
   /** A resolved anchor arrives after the corner it belongs to is already drawn. */
   const attachAnchor = useCallback((id: number, anchor: XRAnchor) => {
-    setCorners((prev) =>
-      prev.map((corner) => (corner.id === id ? { ...corner, anchor } : corner)),
-    );
+    setCorners((prev) => prev.map((corner) => (corner.id === id ? { ...corner, anchor } : corner)));
   }, []);
 
   /** Anchored corners are re-posed every few frames; match them back by id. */
@@ -107,13 +68,24 @@ function App() {
     );
   }, []);
 
-  const showTrouble = useCallback(() => setShowLog(true), []);
-  const undo = useCallback(() => {
+  const reset = useCallback(() => {
     setCorners((prev) => {
-      const last = prev[prev.length - 1];
-      if (last) releaseAnchor(last);
-      return prev.slice(0, -1);
+      for (const corner of prev) releaseAnchor(corner);
+      return [];
     });
+  }, []);
+
+  /**
+   * Stop taps on the UI from also placing a corner.
+   *
+   * With `dom-overlay`, tapping the overlay still fires the session's `select`
+   * event unless the page cancels `beforexrselect` first.
+   */
+  const chromeRef = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return;
+    const block = (event: Event) => event.preventDefault();
+    node.addEventListener('beforexrselect', block);
+    return () => node.removeEventListener('beforexrselect', block);
   }, []);
 
   useEffect(() => {
@@ -131,9 +103,8 @@ function App() {
     };
   }, [logLine]);
 
-  // The XR button fires startSession() without awaiting it, so a rejected
-  // requestSession() (camera denied, ARCore install cancelled, feature
-  // unavailable) would otherwise vanish as an unhandled rejection.
+  // requestSession() is fired without an await inside the library, so a
+  // rejection would otherwise vanish as an unhandled rejection.
   useEffect(() => {
     const onRejection = (event: PromiseRejectionEvent) => {
       const reason = event.reason;
@@ -152,21 +123,10 @@ function App() {
     return () => root.classList.remove('xr-presenting');
   }, [presenting]);
 
-  const instruction = isComplete
-    ? 'Tap anywhere to measure again'
-    : `Aim at a corner and tap - ${corners.length + 1} of ${CORNER_COUNT}`;
-
-  const liveUnits = liveEdge === null ? null : toUnits(liveEdge);
-  const lengthUnits = metrics ? toUnits(metrics.length) : null;
-  const breadthUnits = metrics ? toUnits(metrics.breadth) : null;
-
   return (
     <div
-      className={`fixed inset-0 overflow-hidden text-white ${
-        presenting ? 'bg-transparent' : 'bg-neutral-950'
-      }`}
+      className={`fixed inset-0 overflow-hidden ${presenting ? 'bg-transparent' : 'bg-white'}`}
     >
-      {/* Camera + 3D scene */}
       <Canvas
         className="absolute inset-0"
         gl={{ alpha: true, antialias: true, powerPreference: 'high-performance' }}
@@ -178,13 +138,14 @@ function App() {
           referenceSpace="local"
           onSessionStart={() => {
             setPresenting(true);
-            clear();
+            reset();
             logLine('session started');
           }}
           onSessionEnd={() => {
             setPresenting(false);
-            clear();
-            logLine('session ended - measurement cleared');
+            setStats(IDLE_STATS);
+            reset();
+            logLine('session ended');
           }}
         >
           <ARRuler
@@ -193,124 +154,45 @@ function App() {
             onAddCorner={addCorner}
             onAttachAnchor={attachAnchor}
             onCornersUpdate={updateCorners}
-            onLiveEdge={setLiveEdge}
+            onStats={setStats}
             onDebug={logLine}
           />
         </XR>
       </Canvas>
 
-      {/* Readout */}
-      <header
-        ref={headerRef}
-        className="absolute inset-x-0 top-0 z-20 flex justify-center px-3"
-        style={{ paddingTop: SAFE_TOP }}
-      >
-        <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-neutral-900/70 p-4 shadow-2xl backdrop-blur-xl">
-          <div className="flex items-center gap-2">
-            <h1 className="text-[10px] font-bold uppercase tracking-[0.2em] text-neutral-400">
-              Spatial Ruler
-            </h1>
-            <div className="ml-auto flex gap-1.5">
-              {Array.from({ length: CORNER_COUNT }, (_, index) => (
-                <span
-                  key={index}
-                  className={`h-1.5 w-1.5 rounded-full transition-colors ${
-                    index < corners.length ? 'bg-sky-400' : 'bg-white/20'
-                  }`}
-                />
-              ))}
-            </div>
-          </div>
+      {presenting ? (
+        <MeasureOverlay
+          placed={corners.length}
+          metrics={metrics}
+          stats={stats}
+          log={log}
+          showLog={showLog}
+          onToggleLog={() => setShowLog((visible) => !visible)}
+          onReset={reset}
+          onEnd={session.exit}
+          chromeRef={chromeRef}
+        />
+      ) : (
+        <Onboarding
+          supported={session.supported}
+          busy={session.busy}
+          attempt={session.attempt}
+          onStart={session.enter}
+          onShowDiagnostics={showTrouble}
+        />
+      )}
 
-          {metrics && lengthUnits && breadthUnits ? (
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <div className="min-w-0">
-                <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">
-                  Length
-                </div>
-                <div className="truncate text-3xl font-black tracking-tight tabular-nums">
-                  {lengthUnits.cm}
-                  <span className="ml-1 text-sm font-bold text-neutral-500">cm</span>
-                </div>
-                <div className="truncate text-xs font-medium tabular-nums text-sky-400/90">
-                  {lengthUnits.inches} in
-                </div>
-              </div>
-              <div className="min-w-0">
-                <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">
-                  Breadth
-                </div>
-                <div className="truncate text-3xl font-black tracking-tight tabular-nums">
-                  {breadthUnits.cm}
-                  <span className="ml-1 text-sm font-bold text-neutral-500">cm</span>
-                </div>
-                <div className="truncate text-xs font-medium tabular-nums text-sky-400/90">
-                  {breadthUnits.inches} in
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="mt-3">
-              <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">
-                {corners.length === 0 ? 'Ready' : `Edge ${corners.length}`}
-              </div>
-              <div className="truncate text-4xl font-black tracking-tight tabular-nums">
-                {liveUnits ? liveUnits.cm : '0.0'}
-                <span className="ml-1 text-lg font-bold text-neutral-500">cm</span>
-              </div>
-              <div className="truncate text-xs font-medium tabular-nums text-sky-400/90">
-                {liveUnits ? liveUnits.inches : '0.0'} in
-              </div>
-            </div>
-          )}
-
-          <div
-            className={`mt-3 rounded-xl px-3 py-2 text-[11px] font-bold uppercase tracking-wider ${
-              metrics
-                ? metrics.isRectangular
-                  ? 'bg-emerald-500/15 text-emerald-300'
-                  : 'bg-amber-500/15 text-amber-300'
-                : 'bg-white/10 text-neutral-300'
-            }`}
-          >
-            {metrics ? (
-              <span className="flex items-center gap-1.5">
-                {metrics.isRectangular ? (
-                  <CheckCircledIcon className="h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <ExclamationTriangleIcon className="h-3.5 w-3.5 shrink-0" />
-                )}
-                <span>Diagonals match {metrics.diagonalMatch.toFixed(1)}%</span>
-              </span>
-            ) : (
-              instruction
-            )}
-          </div>
-
-          {metrics && !metrics.isRectangular && (
-            <p className="mt-2 text-[11px] leading-snug text-amber-200/80">
-              Not a true rectangle - the diagonals differ, so this shape is only{' '}
-              {metrics.diagonalMatch.toFixed(1)}% square (needs {RECTANGLE_TOLERANCE}%). Length and
-              breadth are approximate; re-tap the corners more precisely for an exact result.
-            </p>
-          )}
-
-          {metrics && metrics.isRectangular && (
-            <p className="mt-2 text-[11px] leading-snug text-neutral-400">
-              Area {(metrics.area * 10000).toFixed(0)} cm2 - {instruction}
-            </p>
-          )}
-        </div>
-      </header>
-
-      {/* Diagnostics */}
-      {showLog && (
-        <div
-          ref={logRef}
-          className="absolute inset-x-0 z-30 flex justify-center px-3"
-          style={{ bottom: `calc(${SAFE_BOTTOM} + 4.5rem)` }}
-        >
-          <div className="max-h-56 w-full max-w-sm overflow-y-auto overscroll-contain rounded-2xl border border-white/15 bg-black/85 p-3 font-mono text-[10px] leading-relaxed text-neutral-300 backdrop-blur-xl">
+      {/* Diagnostics are reachable before entering AR too */}
+      {!presenting && showLog && (
+        <div className="absolute inset-x-0 bottom-0 z-50 flex justify-center px-4 pb-6">
+          <div className="max-h-56 w-full max-w-sm overflow-y-auto overscroll-contain rounded-2xl bg-zinc-900/95 p-3 font-mono text-[10px] leading-relaxed text-zinc-300 shadow-xl">
+            <button
+              type="button"
+              onClick={() => setShowLog(false)}
+              className="mb-2 w-full text-left text-[10px] font-bold uppercase tracking-widest text-zinc-500"
+            >
+              Diagnostics - tap to close
+            </button>
             {log.map((line, index) => (
               <div
                 key={index}
@@ -326,53 +208,6 @@ function App() {
           </div>
         </div>
       )}
-
-      {/* Controls */}
-      <footer
-        ref={footerRef}
-        className="absolute inset-x-0 bottom-0 z-30 px-3"
-        style={{ paddingBottom: SAFE_BOTTOM }}
-      >
-        <div className="mx-auto flex w-full max-w-sm items-stretch gap-2">
-          <button
-            type="button"
-            onClick={undo}
-            disabled={corners.length === 0}
-            aria-label="Undo last corner"
-            className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-neutral-900/70 text-neutral-300 shadow-2xl backdrop-blur-xl transition active:scale-95 disabled:opacity-30"
-          >
-            <ArrowLeftIcon className="h-5 w-5" />
-          </button>
-
-          <EnterArButton
-            presenting={presenting}
-            onLog={logLine}
-            onTrouble={showTrouble}
-            className="h-14 flex-1 rounded-2xl border border-sky-400/50 bg-sky-600/90 px-4 text-sm font-bold uppercase tracking-wider text-white shadow-[0_0_30px_rgba(14,165,233,0.3)] backdrop-blur-xl transition active:scale-95 disabled:border-white/10 disabled:bg-neutral-800/80 disabled:text-neutral-500 disabled:shadow-none"
-          />
-
-          <button
-            type="button"
-            onClick={clear}
-            disabled={corners.length === 0}
-            aria-label="Clear measurement"
-            className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-neutral-900/70 text-neutral-300 shadow-2xl backdrop-blur-xl transition active:scale-95 disabled:opacity-30"
-          >
-            <TrashIcon className="h-5 w-5" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowLog((visible) => !visible)}
-            aria-label="Toggle diagnostics"
-            className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/10 shadow-2xl backdrop-blur-xl transition active:scale-95 ${
-              showLog ? 'bg-white/20 text-white' : 'bg-neutral-900/70 text-neutral-300'
-            }`}
-          >
-            <InfoCircledIcon className="h-5 w-5" />
-          </button>
-        </div>
-      </footer>
     </div>
   );
 }

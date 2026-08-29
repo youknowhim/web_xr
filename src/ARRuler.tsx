@@ -2,20 +2,16 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useXR } from '@react-three/xr';
 import { useFrame } from '@react-three/fiber';
-import { Text } from '@react-three/drei';
-import {
-  CORNER_COUNT,
-  SURFACE_LIFT,
-  liftedPosition,
-  midpoint,
-  outlineEdges,
-  surfaceNormal,
-  toUnits,
-} from './measure';
+import { CORNER_COUNT, SURFACE_LIFT, liftedPosition, midpoint, outlineEdges } from './measure';
 import type { Corner, RectangleMetrics } from './measure';
+import type { RuntimeStats } from './stats';
 
 const UP = new THREE.Vector3(0, 1, 0);
-const LABEL_LIFT = 0.07;
+
+const DOT_COLOR = '#2563eb';
+const LINE_COLOR = '#3b82f6';
+const WARN_COLOR = '#f59e0b';
+const DONE_COLOR = '#2563eb';
 
 /** Hit-test setup can lose the race with session startup, so it gets retries. */
 const HIT_SOURCE_TRIES = 6;
@@ -24,6 +20,9 @@ const HIT_SOURCE_BACKOFF = 400;
 /** Anchor poses are re-read on this cadence, and applied past this movement. */
 const ANCHOR_SYNC_FRAMES = 10;
 const ANCHOR_MOVE_EPSILON = 0.001;
+
+/** How often the status strip is refreshed. */
+const STATS_INTERVAL_MS = 500;
 
 // Reused every frame so the render loop allocates nothing.
 const scratchMatrix = new THREE.Matrix4();
@@ -41,25 +40,21 @@ type ARRulerProps = {
   onAddCorner: (corner: Corner) => void;
   onAttachAnchor: (id: number, anchor: XRAnchor) => void;
   onCornersUpdate: (corners: Corner[]) => void;
-  onLiveEdge: (meters: number | null) => void;
-  onDebug?: (message: string) => void;
+  onStats: (stats: RuntimeStats) => void;
+  onDebug: (message: string) => void;
 };
 
-/** A cylinder stretched so it spans exactly from `a` to `b`. */
+/** A thin cylinder stretched so it spans exactly from `a` to `b`. */
 function Segment({
   a,
   b,
   color,
-  radius = 0.004,
-  opacity = 1,
-  renderOrder = 0,
+  radius = 0.0022,
 }: {
   a: THREE.Vector3;
   b: THREE.Vector3;
   color: string;
   radius?: number;
-  opacity?: number;
-  renderOrder?: number;
 }) {
   const transform = useMemo(() => {
     const direction = new THREE.Vector3().subVectors(b, a);
@@ -78,48 +73,33 @@ function Segment({
       position={transform.position}
       quaternion={transform.quaternion}
       scale={[1, transform.length, 1]}
-      renderOrder={renderOrder}
+      renderOrder={1}
     >
       <cylinderGeometry args={[radius, radius, 1, 8]} />
-      <meshBasicMaterial color={color} transparent opacity={opacity} />
+      <meshBasicMaterial color={color} />
     </mesh>
   );
 }
 
-/** World-space text that always turns to face the camera. */
-function Label({
-  position,
-  children,
-  color = '#ffffff',
-  fontSize = 0.045,
-}: {
-  position: THREE.Vector3;
-  children: string;
-  color?: string;
-  fontSize?: number;
-}) {
-  const ref = useRef<THREE.Mesh>(null);
+/** A placed corner: a blue dot inside a white ring, always facing the camera. */
+function CornerDot({ position, color }: { position: THREE.Vector3; color: string }) {
+  const ref = useRef<THREE.Group>(null);
 
   useFrame(({ camera }) => {
     ref.current?.quaternion.copy(camera.quaternion);
   });
 
   return (
-    <Text
-      ref={ref}
-      position={position}
-      fontSize={fontSize}
-      color={color}
-      outlineWidth={fontSize * 0.09}
-      outlineColor="#000000"
-      anchorX="center"
-      anchorY="middle"
-      textAlign="center"
-      lineHeight={1.2}
-      renderOrder={4}
-    >
-      {children}
-    </Text>
+    <group ref={ref} position={position}>
+      <mesh renderOrder={2}>
+        <circleGeometry args={[0.011, 24]} />
+        <meshBasicMaterial color="#ffffff" />
+      </mesh>
+      <mesh position={[0, 0, 0.0004]} renderOrder={3}>
+        <circleGeometry args={[0.0075, 24]} />
+        <meshBasicMaterial color={color} />
+      </mesh>
+    </group>
   );
 }
 
@@ -129,11 +109,10 @@ export default function ARRuler({
   onAddCorner,
   onAttachAnchor,
   onCornersUpdate,
-  onLiveEdge,
+  onStats,
   onDebug,
 }: ARRulerProps) {
   const reticleRef = useRef<THREE.Group>(null);
-  const spinnerRef = useRef<THREE.Mesh>(null);
   const liveEdgeRef = useRef<THREE.Mesh>(null);
 
   const session = useXR((state) => state.session);
@@ -143,40 +122,38 @@ export default function ARRuler({
   const sawHitRef = useRef(false);
   const frameCountRef = useRef(0);
 
-  // Only push a live length upward when the displayed value would actually
-  // change, so the HUD is not re-rendering 60 times a second.
-  const lastLiveRef = useRef<string | null>(null);
+  // Status-strip accounting.
+  const statsFramesRef = useRef(0);
+  const statsSinceRef = useRef(0);
+  const statsHitsRef = useRef(0);
 
   // Graphics float just off the surface; measurements use the true points.
   const drawPoints = useMemo(() => corners.map(liftedPosition), [corners]);
   const edges = useMemo(() => outlineEdges(drawPoints), [drawPoints]);
 
-  const planeNormal = useMemo(() => {
-    const normal = new THREE.Vector3();
-    for (const corner of corners) normal.add(surfaceNormal(corner));
-    return normal.lengthSq() < 1e-9 ? new THREE.Vector3(0, 1, 0) : normal.normalize();
-  }, [corners]);
+  const anchorCount = useMemo(
+    () => corners.filter((corner) => corner.anchor).length,
+    [corners],
+  );
 
   /**
    * Acquire the hit-test source, with retries.
    *
-   * requestHitTestSource() can reject if it is called before the session has
-   * finished coming up. One rejection used to leave the reticle dead for the
-   * whole session with nothing on screen to say why - which is exactly the
-   * "sometimes the ring never appears" case.
+   * requestHitTestSource() can reject if called before the session has finished
+   * coming up. A single rejection used to leave the reticle dead for the whole
+   * session - the "sometimes the ring never appears" case.
    */
   useEffect(() => {
     if (!session) return;
 
     sawHitRef.current = false;
-    lastLiveRef.current = null;
     hitResultRef.current = null;
     if (liveEdgeRef.current) liveEdgeRef.current.visible = false;
     if (reticleRef.current) reticleRef.current.visible = false;
 
     const request = session.requestHitTestSource?.bind(session);
     if (!request) {
-      onDebug?.('hit-test API MISSING on this session');
+      onDebug('hit-test API MISSING on this session');
       return;
     }
 
@@ -194,15 +171,15 @@ export default function ARRuler({
             return;
           }
           hitSourceRef.current = source;
-          onDebug?.(`hit-test source ready (try ${attempt})`);
+          onDebug(`hit-test source ready (try ${attempt})`);
         })
         .catch((error: Error) => {
           if (cancelled) return;
-          onDebug?.(`hit-test source failed (try ${attempt}): ${error.name}: ${error.message}`);
+          onDebug(`hit-test source failed (try ${attempt}): ${error.name}: ${error.message}`);
           if (attempt < HIT_SOURCE_TRIES) {
             timer = setTimeout(() => acquire(attempt + 1), HIT_SOURCE_BACKOFF * attempt);
           } else {
-            onDebug?.('hit-test unavailable - surfaces cannot be detected');
+            onDebug('hit-test unavailable - surfaces cannot be detected');
           }
         });
     };
@@ -245,16 +222,14 @@ export default function ARRuler({
     [corners, onCornersUpdate],
   );
 
-  useFrame((state, delta, frame) => {
-    if (spinnerRef.current) spinnerRef.current.rotation.z += delta * 1.5;
+  useFrame((state, _, frame) => {
     if (!frame) return;
 
     const referenceSpace = state.gl.xr.getReferenceSpace();
-    if (!referenceSpace) return;
-
     const source = hitSourceRef.current;
-    const [hit] = source ? frame.getHitTestResults(source) : [];
-    const pose = hit?.getPose(referenceSpace);
+
+    const [hit] = source && referenceSpace ? frame.getHitTestResults(source) : [];
+    const pose = referenceSpace ? hit?.getPose(referenceSpace) : undefined;
     const reticle = reticleRef.current;
 
     if (!pose) {
@@ -264,7 +239,7 @@ export default function ARRuler({
     } else {
       if (!sawHitRef.current) {
         sawHitRef.current = true;
-        onDebug?.('surface found - reticle is live');
+        onDebug('surface found - reticle is live');
       }
       hitResultRef.current = hit;
       scratchMatrix.fromArray(pose.transform.matrix);
@@ -276,56 +251,61 @@ export default function ARRuler({
 
     // Live edge from the last placed corner out to the reticle.
     const liveEdge = liveEdgeRef.current;
-    const drawingOutline = pose && corners.length > 0 && corners.length < CORNER_COUNT;
-
-    if (!drawingOutline) {
+    if (!pose || corners.length === 0 || corners.length >= CORNER_COUNT) {
       if (liveEdge) liveEdge.visible = false;
-      if (lastLiveRef.current !== null) {
-        lastLiveRef.current = null;
-        onLiveEdge(null);
-      }
-    } else {
-      const last = corners[corners.length - 1];
+    } else if (liveEdge) {
       scratchCursor.setFromMatrixPosition(scratchMatrix);
-      const distance = last.position.distanceTo(scratchCursor);
+      scratchNormal
+        .set(0, 1, 0)
+        .applyQuaternion(scratchQuaternion.setFromRotationMatrix(scratchMatrix));
+      scratchDraw.copy(scratchCursor).addScaledVector(scratchNormal, SURFACE_LIFT);
 
-      if (liveEdge) {
-        if (distance < 1e-4) {
-          liveEdge.visible = false;
-        } else {
-          scratchNormal
-            .set(0, 1, 0)
-            .applyQuaternion(scratchQuaternion.setFromRotationMatrix(scratchMatrix));
-          scratchDraw.copy(scratchCursor).addScaledVector(scratchNormal, SURFACE_LIFT);
-
-          const from = drawPoints[drawPoints.length - 1];
-          liveEdge.visible = true;
-          liveEdge.position.copy(from).add(scratchDraw).multiplyScalar(0.5);
-          liveEdge.quaternion.setFromUnitVectors(
-            UP,
-            scratchDirection.subVectors(scratchDraw, from).normalize(),
-          );
-          liveEdge.scale.set(1, from.distanceTo(scratchDraw), 1);
-        }
-      }
-
-      const rounded = toUnits(distance).cm;
-      if (rounded !== lastLiveRef.current) {
-        lastLiveRef.current = rounded;
-        onLiveEdge(distance);
+      const from = drawPoints[drawPoints.length - 1];
+      const span = from.distanceTo(scratchDraw);
+      if (span < 1e-4) {
+        liveEdge.visible = false;
+      } else {
+        liveEdge.visible = true;
+        liveEdge.position.copy(from).add(scratchDraw).multiplyScalar(0.5);
+        liveEdge.quaternion.setFromUnitVectors(
+          UP,
+          scratchDirection.subVectors(scratchDraw, from).normalize(),
+        );
+        liveEdge.scale.set(1, span, 1);
       }
     }
 
-    frameCountRef.current += 1;
-    if (frameCountRef.current % ANCHOR_SYNC_FRAMES === 0) {
-      syncAnchors(frame, referenceSpace);
+    if (referenceSpace) {
+      frameCountRef.current += 1;
+      if (frameCountRef.current % ANCHOR_SYNC_FRAMES === 0) {
+        syncAnchors(frame, referenceSpace);
+      }
+    }
+
+    // Status strip, refreshed twice a second.
+    statsFramesRef.current += 1;
+    if (pose) statsHitsRef.current += 1;
+    const now = performance.now();
+    if (statsSinceRef.current === 0) statsSinceRef.current = now;
+    const elapsed = now - statsSinceRef.current;
+    if (elapsed >= STATS_INTERVAL_MS) {
+      onStats({
+        hitSource: Boolean(source),
+        refSpace: Boolean(referenceSpace),
+        fps: Math.round((statsFramesRef.current * 1000) / elapsed),
+        hits: statsHitsRef.current,
+        anchors: anchorCount,
+      });
+      statsFramesRef.current = 0;
+      statsHitsRef.current = 0;
+      statsSinceRef.current = now;
     }
   });
 
   const handleSelect = useCallback(() => {
     const reticle = reticleRef.current;
     if (!reticle || !reticle.visible) {
-      onDebug?.('tap ignored - aim at a surface first');
+      onDebug('tap ignored - aim at a surface first');
       return;
     }
 
@@ -340,12 +320,12 @@ export default function ARRuler({
     const hit = hitResultRef.current;
     const createAnchor = hit?.createAnchor?.bind(hit);
     if (!createAnchor) {
-      onDebug?.('anchors unavailable - points may drift');
+      onDebug('anchors unavailable - points may drift');
       return;
     }
     createAnchor()
       .then((anchor) => onAttachAnchor(id, anchor))
-      .catch((error: Error) => onDebug?.(`anchor failed: ${error.name}: ${error.message}`));
+      .catch((error: Error) => onDebug(`anchor failed: ${error.name}: ${error.message}`));
   }, [onAddCorner, onAttachAnchor, onDebug]);
 
   // Listen on the session itself. A phone tap arrives as a transient input
@@ -358,116 +338,47 @@ export default function ARRuler({
     return () => session.removeEventListener('select', listener);
   }, [session, handleSelect]);
 
-  const outlineColor = metrics ? (metrics.isRectangular ? '#10b981' : '#f59e0b') : '#38bdf8';
-
-  const labels = useMemo(() => {
-    if (!metrics) return null;
-    const length = toUnits(metrics.length);
-    const breadth = toUnits(metrics.breadth);
-    return {
-      length: {
-        position: metrics.lengthAnchor.clone().addScaledVector(planeNormal, LABEL_LIFT),
-        text: `L  ${length.cm} cm\n${length.inches} in`,
-      },
-      breadth: {
-        position: metrics.breadthAnchor.clone().addScaledVector(planeNormal, LABEL_LIFT),
-        text: `B  ${breadth.cm} cm\n${breadth.inches} in`,
-      },
-    };
-  }, [metrics, planeNormal]);
+  const outlineColor = metrics
+    ? metrics.isRectangular
+      ? DONE_COLOR
+      : WARN_COLOR
+    : LINE_COLOR;
 
   return (
     <>
       <ambientLight intensity={2} />
-      <directionalLight position={[1, 4, 2]} intensity={3} />
 
-      {/* Surface reticle. Hidden once the shape is closed so it stops
-          overlapping the finished outline. */}
+      {/* Surface reticle, hidden once the fourth corner lands */}
       <group ref={reticleRef} matrixAutoUpdate={false} visible={false}>
         {corners.length < CORNER_COUNT && (
           <group position={[0, SURFACE_LIFT, 0]}>
-            <mesh ref={spinnerRef} rotation={[-Math.PI / 2, 0, 0]} renderOrder={3}>
-              <ringGeometry args={[0.03, 0.035, 32]} />
-              <meshBasicMaterial
-                color="#38bdf8"
-                transparent
-                opacity={0.9}
-                side={THREE.DoubleSide}
-              />
+            <mesh rotation={[-Math.PI / 2, 0, 0]} renderOrder={3}>
+              <ringGeometry args={[0.019, 0.022, 40]} />
+              <meshBasicMaterial color={DOT_COLOR} side={THREE.DoubleSide} />
             </mesh>
             <mesh rotation={[-Math.PI / 2, 0, 0]} renderOrder={3}>
-              <circleGeometry args={[0.005, 32]} />
+              <circleGeometry args={[0.004, 20]} />
               <meshBasicMaterial color="#ffffff" side={THREE.DoubleSide} />
             </mesh>
           </group>
         )}
       </group>
 
-      {/* Placed corners, oriented to the surface they landed on */}
+      {/* Placed corners */}
       {corners.map((corner, index) => (
-        <group key={corner.id} position={drawPoints[index]} quaternion={corner.quaternion}>
-          <mesh rotation={[-Math.PI / 2, 0, 0]} renderOrder={2}>
-            <ringGeometry args={[0.014, 0.019, 32]} />
-            <meshBasicMaterial
-              color={index === 0 ? '#10b981' : '#ffffff'}
-              transparent
-              opacity={0.6}
-              side={THREE.DoubleSide}
-            />
-          </mesh>
-          <mesh position={[0, 0.008, 0]} renderOrder={2}>
-            <sphereGeometry args={[0.008, 16, 16]} />
-            <meshStandardMaterial
-              color={index === 0 ? '#10b981' : '#ffffff'}
-              roughness={0.1}
-              metalness={0.5}
-            />
-          </mesh>
-        </group>
+        <CornerDot key={corner.id} position={drawPoints[index]} color={outlineColor} />
       ))}
 
-      {/* Outline edges */}
+      {/* Outline */}
       {edges.map(([a, b], index) => (
-        <Segment key={index} a={a} b={b} color={outlineColor} opacity={0.9} renderOrder={1} />
+        <Segment key={index} a={a} b={b} color={outlineColor} />
       ))}
 
       {/* Live edge from the last corner to the reticle */}
       <mesh ref={liveEdgeRef} visible={false} renderOrder={1}>
-        <cylinderGeometry args={[0.003, 0.003, 1, 8]} />
-        <meshBasicMaterial color="#38bdf8" transparent opacity={0.6} />
+        <cylinderGeometry args={[0.0018, 0.0018, 1, 8]} />
+        <meshBasicMaterial color={LINE_COLOR} transparent opacity={0.7} />
       </mesh>
-
-      {/* Diagonals, drawn once the shape closes so the match score is visible */}
-      {metrics && (
-        <>
-          <Segment
-            a={drawPoints[0]}
-            b={drawPoints[2]}
-            color={outlineColor}
-            radius={0.0015}
-            opacity={0.4}
-            renderOrder={1}
-          />
-          <Segment
-            a={drawPoints[1]}
-            b={drawPoints[3]}
-            color={outlineColor}
-            radius={0.0015}
-            opacity={0.4}
-            renderOrder={1}
-          />
-        </>
-      )}
-
-      {/* Result labels */}
-      {labels && (
-        <>
-          <Label position={labels.length.position}>{labels.length.text}</Label>
-          <Label position={labels.breadth.position} color="#7dd3fc">
-            {labels.breadth.text}
-          </Label>
-        </>
-      )}
     </>
   );
 }
